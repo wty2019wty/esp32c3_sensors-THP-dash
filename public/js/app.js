@@ -4,6 +4,25 @@ import { drawAll, bindChartCursor, pointAt } from './charts.js';
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 
+function isCoarsePointer() {
+  return (
+    matchMedia('(hover: none) and (pointer: coarse)').matches ||
+    window.innerWidth <= 640
+  );
+}
+
+function isNarrowViewport() {
+  return window.innerWidth <= 640;
+}
+
+function updateChartHelp() {
+  const el = $('#chart-help');
+  if (!el) return;
+  el.textContent = isCoarsePointer()
+    ? '在曲线上点选可查看该时刻数据；再点其它点可切换，再次点选取消。'
+    : '在曲线上移动光标可查看该时刻数据；点击固定，再次点击或 Esc 取消；键盘 ←/→ 可逐点查看。';
+}
+
 const state = {
   user: null,
   devices: [],
@@ -115,8 +134,12 @@ function updateCursorUI() {
   readout.hidden = false;
   $('#readout-ts').textContent = info.label;
   $('#readout-hint').textContent = cursor.pinned
-    ? '已固定 · 点击曲线其它点可改 · Esc 取消'
-    : '悬停预览 · 点击固定 · ←/→ 微调';
+    ? isCoarsePointer()
+      ? '已选中 · 再次点选取消'
+      : '已固定 · 点击曲线其它点可改 · Esc 取消'
+    : isCoarsePointer()
+      ? '点选可查看 · 再次点选取消'
+      : '悬停预览 · 点击固定 · ←/→ 微调';
 
   const map = {
     temperature: '#readout-t',
@@ -128,8 +151,10 @@ function updateCursorUI() {
     if (el) el.textContent = fmtNum(v.value, v.key === 'pressure' ? 1 : 1);
   }
 
-  // floating tooltip near pointer (or skip when touch-only pin without pointer)
-  if (cursor.lastPointer.x || cursor.lastPointer.y) {
+  // Floating tooltip is for mouse hover; on touch/narrow use the readout bar.
+  const coarse = isCoarsePointer();
+  const narrow = isNarrowViewport();
+  if (!coarse && !narrow && (cursor.lastPointer.x || cursor.lastPointer.y)) {
     tip.hidden = false;
     tip.innerHTML = `
       <div class="tt-time">${info.label}</div>
@@ -213,6 +238,7 @@ function renderCharts() {
   $('#chart-combined').classList.toggle('hidden', state.view !== 'combined' || empty);
   $('#chart-split').classList.toggle('hidden', state.view !== 'split' || empty);
 
+  updateChartHelp();
   ensureCursorBinding();
   // reset selection when data set changes length / reload
   if (empty) {
@@ -651,8 +677,16 @@ $('#table-tokens')?.addEventListener('click', async (e) => {
   }
 });
 
-window.addEventListener('resize', () => {
-  if (state.points.length) renderCharts();
-});
+let resizeTimer = null;
+function onViewportChange() {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(() => {
+    updateChartHelp();
+    if (state.points.length) renderCharts();
+  }, 120);
+}
+window.addEventListener('resize', onViewportChange);
+window.addEventListener('orientationchange', onViewportChange);
 
+updateChartHelp();
 boot();

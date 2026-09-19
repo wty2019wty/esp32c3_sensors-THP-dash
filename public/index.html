@@ -2,8 +2,9 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <meta name="color-scheme" content="dark" />
+  <meta name="theme-color" content="#0b1220" />
   <title>THP Dash · 温湿度气压监控</title>
   <link rel="stylesheet" href="./css/app.css" />
 </head>
@@ -69,35 +70,41 @@
           </div>
         </div>
         <div class="topbar-controls">
-          <label class="inline">
-            <span>设备</span>
-            <select id="sel-device"></select>
-          </label>
-          <label class="inline">
-            <span>范围</span>
-            <select id="sel-range">
-              <option value="today" selected>当天</option>
-              <option value="24h">近 24 小时</option>
-              <option value="7d">近 7 天</option>
-              <option value="30d">近 30 天</option>
-              <option value="90d">近 90 天</option>
-              <option value="365d">近 1 年</option>
-              <option value="custom">自定义…</option>
-            </select>
-          </label>
+          <div class="topbar-filters">
+            <label class="inline">
+              <span>设备</span>
+              <select id="sel-device"></select>
+            </label>
+            <label class="inline">
+              <span>范围</span>
+              <select id="sel-range">
+                <option value="today" selected>当天</option>
+                <option value="24h">近 24 小时</option>
+                <option value="7d">近 7 天</option>
+                <option value="30d">近 30 天</option>
+                <option value="90d">近 90 天</option>
+                <option value="365d">近 1 年</option>
+                <option value="custom">自定义…</option>
+              </select>
+            </label>
+          </div>
           <div id="custom-range" class="custom-range hidden" hidden>
-            <input type="datetime-local" id="inp-from" />
+            <input type="datetime-local" id="inp-from" aria-label="开始时间" />
             <span class="sep">→</span>
-            <input type="datetime-local" id="inp-to" />
+            <input type="datetime-local" id="inp-to" aria-label="结束时间" />
             <button type="button" class="btn ghost" id="btn-apply-range">应用</button>
           </div>
-          <div class="segmented" role="group" aria-label="视图模式">
-            <button type="button" class="seg active" data-view="combined" id="btn-view-combined">综合</button>
-            <button type="button" class="seg" data-view="split" id="btn-view-split">分项</button>
+          <div class="topbar-row">
+            <div class="segmented" role="group" aria-label="视图模式">
+              <button type="button" class="seg active" data-view="combined" id="btn-view-combined">综合</button>
+              <button type="button" class="seg" data-view="split" id="btn-view-split">分项</button>
+            </div>
+            <div class="topbar-actions">
+              <button type="button" class="btn" id="btn-export">导出 CSV</button>
+              <button type="button" class="btn ghost" id="btn-admin" hidden>管理</button>
+              <button type="button" class="btn ghost" id="btn-logout">退出</button>
+            </div>
           </div>
-          <button type="button" class="btn" id="btn-export">导出 CSV</button>
-          <button type="button" class="btn ghost" id="btn-admin" hidden>管理</button>
-          <button type="button" class="btn ghost" id="btn-logout">退出</button>
         </div>
       </header>
 
@@ -164,7 +171,7 @@
             <div class="readout-time">
               <span class="readout-label">选中时刻</span>
               <strong id="readout-ts">—</strong>
-              <span class="readout-hint" id="readout-hint">点击可固定 · Esc 取消</span>
+              <span class="readout-hint" id="readout-hint">点选可查看 · 再次点选取消</span>
             </div>
             <div class="readout-vals">
               <div class="rv temp"><span>温度</span><strong id="readout-t">—</strong><em>°C</em></div>
@@ -174,7 +181,7 @@
           </div>
           <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
           <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
-          <p class="chart-help" id="chart-help">在曲线上移动光标可查看该时刻数据；点击固定，再次点击或 Esc 取消；键盘 ←/→ 可逐点查看。</p>
+          <p class="chart-help" id="chart-help">在曲线上点选或悬停可查看该时刻数据；再次点选取消；桌面端可用 ←/→ 微调。</p>
         </section>
 
         <section class="admin-panel hidden" id="admin-panel" hidden>

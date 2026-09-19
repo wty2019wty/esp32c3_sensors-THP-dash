@@ -23,16 +23,41 @@ const SERIES_UNIT = {
   pressure: 'hPa',
 };
 
-/** Fixed CSS heights — never read back canvas.height (it mutates after draw). */
+/** Default CSS heights — JS overrides inline; keep these as fallbacks only. */
 const CSS_HEIGHT = {
   combined: 360,
   split: 180,
 };
 
+function viewportWidth() {
+  return (typeof window !== 'undefined' && window.innerWidth) || 1024;
+}
+
+/** Adaptive chart CSS height for the current viewport width. */
+export function chartCssHeight(kind) {
+  const w = viewportWidth();
+  if (kind === 'split') {
+    if (w <= 360) return 130;
+    if (w <= 480) return 140;
+    if (w <= 640) return 160;
+    return CSS_HEIGHT.split;
+  }
+  if (w <= 360) return 220;
+  if (w <= 480) return 260;
+  if (w <= 640) return 300;
+  return CSS_HEIGHT.combined;
+}
+
+function resolveCssHeight(canvas, kind) {
+  const fromStyle = parseFloat(canvas?.style?.height);
+  if (Number.isFinite(fromStyle) && fromStyle > 40) return fromStyle;
+  return chartCssHeight(kind);
+}
+
 function dprCanvas(canvas, cssH) {
   const rect = canvas.getBoundingClientRect();
   const dpr = (typeof globalThis !== 'undefined' && globalThis.devicePixelRatio) || 1;
-  const cssW = Math.max(canvas.clientWidth || rect.width || 800, 320);
+  const cssW = Math.max(canvas.clientWidth || rect.width || 800, 200);
   const h = Number(cssH) || 240;
   // Inline style wins over CSS height:auto and keeps aspect stable across redraws.
   canvas.style.width = '100%';
@@ -87,13 +112,45 @@ function formatTsShort(ts) {
 
 function plotBox(width, height, kind) {
   if (kind === 'split') {
-    return { padL: 48, padR: 16, padT: 12, padB: 28, plotW: width - 48 - 16, plotH: height - 12 - 28, padB: 28 };
+    const padL = width < 400 ? 36 : 48;
+    const padR = width < 400 ? 10 : 16;
+    const padT = 10;
+    const padB = width < 400 ? 22 : 28;
+    return {
+      padL,
+      padR,
+      padT,
+      padB,
+      plotW: Math.max(width - padL - padR, 40),
+      plotH: Math.max(height - padT - padB, 30),
+    };
   }
-  const padL = 52;
-  const padR = 56;
-  const padT = 16;
-  const padB = 36;
-  return { padL, padR, padT, padB, plotW: width - padL - padR, plotH: height - padT - padB };
+  let padL, padR, padT, padB;
+  if (width < 400) {
+    padL = 34; padR = 34; padT = 10; padB = 26;
+  } else if (width < 640) {
+    padL = 40; padR = 42; padT = 12; padB = 30;
+  } else {
+    padL = 52; padR = 56; padT = 16; padB = 36;
+  }
+  return {
+    padL,
+    padR,
+    padT,
+    padB,
+    plotW: Math.max(width - padL - padR, 40),
+    plotH: Math.max(height - padT - padB, 30),
+  };
+}
+
+function xTickCount(width) {
+  if (width < 400) return 2;
+  if (width < 640) return 3;
+  return 5;
+}
+
+function axisFont(width) {
+  return width < 400 ? '10px system-ui, sans-serif' : '11px system-ui, sans-serif';
 }
 
 function xOf(tsMs, xMin, xSpan, padL, plotW) {
@@ -155,7 +212,7 @@ export function drawCombined(canvas, points, opts = {}) {
       ? opts.series
       : ['temperature', 'humidity', 'pressure'];
   const cursorIndex = opts.cursorIndex == null ? null : opts.cursorIndex;
-  const { ctx, width, height } = dprCanvas(canvas, opts.cssHeight || CSS_HEIGHT.combined);
+  const { ctx, width, height } = dprCanvas(canvas, opts.cssHeight || chartCssHeight('combined'));
   const box = plotBox(width, height, 'combined');
   const { padL, padT, plotW, plotH } = box;
 
@@ -188,32 +245,32 @@ export function drawCombined(canvas, points, opts = {}) {
   }
 
   ctx.fillStyle = COLORS.text;
-  ctx.font = '11px system-ui, sans-serif';
+  ctx.font = axisFont(width);
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   for (let i = 0; i <= gridLines; i++) {
     const y = padT + (plotH * i) / gridLines;
     const lv = left.max - ((left.max - left.min) * i) / gridLines;
     const rv = right.max - ((right.max - right.min) * i) / gridLines;
-    ctx.fillText(formatTick(lv), padL - 8, y);
+    ctx.fillText(formatTick(lv), padL - 6, y);
     ctx.textAlign = 'left';
-    ctx.fillText(formatTick(rv), padL + plotW + 8, y);
+    ctx.fillText(formatTick(rv), padL + plotW + 6, y);
     ctx.textAlign = 'right';
   }
 
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  const xTicks = 5;
+  const xTicks = xTickCount(width);
   for (let i = 0; i <= xTicks; i++) {
     const ratio = i / xTicks;
     const x = padL + plotW * ratio;
     const ts = new Date(xMin + xSpan * ratio).toISOString();
-    ctx.fillText(formatTsShort(ts), x, padT + plotH + 10);
+    ctx.fillText(formatTsShort(ts), x, padT + plotH + 8);
   }
 
   function drawSeries(key, bounds) {
     ctx.strokeStyle = COLORS[key];
-    ctx.lineWidth = 1.8;
+    ctx.lineWidth = width < 400 ? 1.5 : 1.8;
     ctx.beginPath();
     points.forEach((p, i) => {
       const x = xOf(Date.parse(p.ts), xMin, xSpan, padL, plotW);
@@ -251,7 +308,7 @@ export function drawCombined(canvas, points, opts = {}) {
 
 export function drawSeriesChart(canvas, points, key, opts = {}) {
   const cursorIndex = opts.cursorIndex == null ? null : opts.cursorIndex;
-  const { ctx, width, height } = dprCanvas(canvas, opts.cssHeight || CSS_HEIGHT.split);
+  const { ctx, width, height } = dprCanvas(canvas, opts.cssHeight || chartCssHeight('split'));
   const box = plotBox(width, height, 'split');
   const { padL, padT, plotW, plotH } = box;
 
@@ -278,14 +335,14 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
     ctx.stroke();
     const lv = bounds.max - ((bounds.max - bounds.min) * i) / gridLines;
     ctx.fillStyle = COLORS.text;
-    ctx.font = '11px system-ui, sans-serif';
+    ctx.font = axisFont(width);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(formatTick(lv), padL - 6, y);
+    ctx.fillText(formatTick(lv), padL - 4, y);
   }
 
   ctx.strokeStyle = COLORS[key];
-  ctx.lineWidth = 1.8;
+  ctx.lineWidth = width < 400 ? 1.5 : 1.8;
   ctx.beginPath();
   points.forEach((p, i) => {
     const x = xOf(Date.parse(p.ts), xMin, xSpan, padL, plotW);
@@ -296,10 +353,18 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
   ctx.stroke();
 
   ctx.fillStyle = COLORS.text;
-  ctx.textAlign = 'center';
+  ctx.font = axisFont(width);
   ctx.textBaseline = 'top';
-  ctx.fillText(formatTsShort(new Date(xMin).toISOString()), padL + 8, padT + plotH + 8);
-  ctx.fillText(formatTsShort(new Date(xMax).toISOString()), padL + plotW - 8, padT + plotH + 8);
+  if (width < 400) {
+    ctx.textAlign = 'left';
+    ctx.fillText(formatTsShort(new Date(xMin).toISOString()), padL + 2, padT + plotH + 6);
+    ctx.textAlign = 'right';
+    ctx.fillText(formatTsShort(new Date(xMax).toISOString()), padL + plotW - 2, padT + plotH + 6);
+  } else {
+    ctx.textAlign = 'center';
+    ctx.fillText(formatTsShort(new Date(xMin).toISOString()), padL + 8, padT + plotH + 6);
+    ctx.fillText(formatTsShort(new Date(xMax).toISOString()), padL + plotW - 8, padT + plotH + 6);
+  }
 
   ctx.strokeStyle = COLORS.grid;
   ctx.strokeRect(padL, padT, plotW, plotH);
@@ -376,8 +441,8 @@ export function bindChartCursor({
     if (!pts.length) return null;
     const rect = canvas.getBoundingClientRect();
     const clientX = evt.clientX ?? evt.touches?.[0]?.clientX ?? 0;
-    const width = Math.max(canvas.clientWidth || rect.width || 800, 320);
-    const height = kind === 'split' ? CSS_HEIGHT.split : CSS_HEIGHT.combined;
+    const width = Math.max(canvas.clientWidth || rect.width || 800, 200);
+    const height = resolveCssHeight(canvas, kind);
     const box = plotBox(width, height, kind);
     const xs = pts.map((p) => Date.parse(p.ts));
     const xMin = Math.min(...xs);
@@ -396,12 +461,16 @@ export function bindChartCursor({
 
     canvas.addEventListener('pointermove', (evt) => {
       if (pinned) return;
+      // Touch: pointermove after pointerdown is noisy; only follow mouse/pen hover.
+      if (evt.pointerType === 'touch') return;
       const i = indexFromEvent(canvas, evt, kind);
       setIndex(i, { pin: false });
     });
 
     canvas.addEventListener('pointerleave', () => {
       if (pinned) return;
+      // Keep pinned/selected readout visible on touch / narrow screens.
+      if (matchMedia('(hover: none)').matches || (typeof window !== 'undefined' && window.innerWidth <= 640)) return;
       setIndex(null, { pin: false });
     });
 
@@ -411,7 +480,7 @@ export function bindChartCursor({
         setIndex(null, { pin: false });
         return;
       }
-      // click same point → unpin; else pin
+      // tap same point → unpin; else pin (works for touch and mouse)
       if (pinned && i === index) {
         setIndex(null, { pin: false });
       } else {
@@ -451,4 +520,4 @@ export function bindChartCursor({
   };
 }
 
-export { COLORS, SERIES_LABEL, SERIES_UNIT };
+export { COLORS, SERIES_LABEL, SERIES_UNIT, CSS_HEIGHT };
