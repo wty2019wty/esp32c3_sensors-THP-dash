@@ -39,7 +39,7 @@ Pages Dash（自建登录会话 Cookie）
 - **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**
 - **查询** `GET /api/v1/readings`：默认当天，自动降采样
 - **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`；长范围与曲线同一降采样
-- **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板
+- **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板；**光标/点击查看曲线上任一时刻数据**
 
 ## 部署（Cloudflare）
 
@@ -289,6 +289,16 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - [ ] CSV 导出文件含表头 `timestamp,temperature,humidity,pressure`  
 
 ---
+
+### 图表数据拾取
+
+| 操作 | 行为 |
+|------|------|
+| 鼠标在曲线上移动 | 十字线吸附最近采样点，浮动提示显示该时刻温湿度气压 |
+| 点击 | **固定**选中点，图下方「选中时刻」读数条持续显示 |
+| 再次点击同一点 / Esc | 取消固定 |
+| 键盘 ←/→（画布聚焦时） | 逐点查看；Home/End 到首尾 |
+| 分项图 | 任一子图悬停/点击，三图十字线与读数条同步 |
 
 ## 自动降采样（v1）
 

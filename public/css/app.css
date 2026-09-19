@@ -445,8 +445,14 @@ select {
 .chart-host canvas,
 .chart-split canvas {
   width: 100%;
-  height: auto;
+  height: 360px; /* fallback; JS sets exact inline height */
   display: block;
+  max-height: 420px;
+}
+
+.chart-split canvas {
+  height: 180px;
+  max-height: 220px;
 }
 
 .chart-split {
@@ -465,6 +471,139 @@ select {
   margin: 16px 0 4px;
   color: var(--muted);
   text-align: center;
+}
+
+.chart-help {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.chart-readout {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.readout-time {
+  display: grid;
+  gap: 2px;
+  min-width: 180px;
+}
+
+.readout-label {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.readout-time strong {
+  font-family: var(--mono);
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.readout-hint {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.readout-vals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.rv {
+  min-width: 96px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--bg);
+}
+
+.rv span {
+  display: block;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.rv strong {
+  font-family: var(--mono);
+  font-size: 1.25rem;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.rv em {
+  font-style: normal;
+  color: var(--muted);
+  font-size: 0.75rem;
+  margin-left: 2px;
+}
+
+.rv.temp strong { color: var(--temp); }
+.rv.humid strong { color: var(--humid); }
+.rv.press strong { color: var(--press); }
+
+.chart-tooltip {
+  position: fixed;
+  z-index: 40;
+  pointer-events: none;
+  min-width: 160px;
+  max-width: 240px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: rgba(18, 26, 43, 0.96);
+  box-shadow: var(--shadow);
+  font-size: 0.82rem;
+}
+
+.chart-tooltip .tt-time {
+  font-family: var(--mono);
+  color: var(--ink);
+  margin-bottom: 4px;
+  font-size: 0.78rem;
+}
+
+.chart-tooltip .tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  line-height: 1.45;
+}
+
+.chart-tooltip .tt-row span {
+  color: var(--muted);
+}
+
+.chart-tooltip .tt-row i {
+  font-style: normal;
+  font-family: var(--mono);
+  font-weight: 600;
+}
+
+.chart-tooltip .tt-row.temp i { color: var(--temp); }
+.chart-tooltip .tt-row.humid i { color: var(--humid); }
+.chart-tooltip .tt-row.press i { color: var(--press); }
+
+.chart-tooltip .tt-pin {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.chart-host canvas:focus-visible,
+.chart-split canvas:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 /* ----- Admin ----- */

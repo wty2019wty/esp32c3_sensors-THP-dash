@@ -1,5 +1,5 @@
 import { api, setCsrf, syncCsrfFromCookie, exportCsv, isDemo, setDemo } from './api.js';
-import { drawAll } from './charts.js';
+import { drawAll, bindChartCursor, pointAt } from './charts.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -15,6 +15,14 @@ const state = {
   series: new Set(['temperature', 'humidity', 'pressure']),
   points: [],
   granularity: null,
+};
+
+/** chart cursor inspection (hover / pin) */
+const cursor = {
+  ctrl: null,
+  index: null,
+  pinned: false,
+  lastPointer: { x: 0, y: 0 },
 };
 
 function show(view) {
@@ -92,6 +100,97 @@ function fmtTime(iso) {
   }
 }
 
+function updateCursorUI() {
+  const readout = $('#chart-readout');
+  const tip = $('#chart-tooltip');
+  const empty = state.points.length === 0;
+  const info = !empty && cursor.index != null ? pointAt(state.points, cursor.index) : null;
+
+  if (!info) {
+    readout.hidden = true;
+    tip.hidden = true;
+    return;
+  }
+
+  readout.hidden = false;
+  $('#readout-ts').textContent = info.label;
+  $('#readout-hint').textContent = cursor.pinned
+    ? '已固定 · 点击曲线其它点可改 · Esc 取消'
+    : '悬停预览 · 点击固定 · ←/→ 微调';
+
+  const map = {
+    temperature: '#readout-t',
+    humidity: '#readout-h',
+    pressure: '#readout-p',
+  };
+  for (const v of info.values) {
+    const el = $(map[v.key]);
+    if (el) el.textContent = fmtNum(v.value, v.key === 'pressure' ? 1 : 1);
+  }
+
+  // floating tooltip near pointer (or skip when touch-only pin without pointer)
+  if (cursor.lastPointer.x || cursor.lastPointer.y) {
+    tip.hidden = false;
+    tip.innerHTML = `
+      <div class="tt-time">${info.label}</div>
+      <div class="tt-row temp"><span>温度</span><i>${fmtNum(info.values[0].value)} °C</i></div>
+      <div class="tt-row humid"><span>湿度</span><i>${fmtNum(info.values[1].value)} %RH</i></div>
+      <div class="tt-row press"><span>气压</span><i>${fmtNum(info.values[2].value, 1)} hPa</i></div>
+      <div class="tt-pin">${cursor.pinned ? '已固定' : '点击固定'}</div>
+    `;
+    const pad = 14;
+    const tw = tip.offsetWidth || 180;
+    const th = tip.offsetHeight || 100;
+    let left = cursor.lastPointer.x + pad;
+    let top = cursor.lastPointer.y + pad;
+    if (left + tw > window.innerWidth - 8) left = cursor.lastPointer.x - tw - pad;
+    if (top + th > window.innerHeight - 8) top = cursor.lastPointer.y - th - pad;
+    tip.style.left = `${Math.max(8, left)}px`;
+    tip.style.top = `${Math.max(8, top)}px`;
+  } else {
+    tip.hidden = true;
+  }
+}
+
+function ensureCursorBinding() {
+  if (cursor.ctrl) return cursor.ctrl;
+  cursor.ctrl = bindChartCursor({
+    combinedCanvas: $('#canvas-combined'),
+    splitCanvases: { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
+    getPoints: () => state.points,
+    getView: () => state.view,
+    onChange: ({ index, pinned }) => {
+      cursor.index = index;
+      cursor.pinned = pinned;
+      const empty = state.points.length === 0;
+      drawAll(
+        $('#canvas-combined'),
+        { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
+        state.points,
+        state.view,
+        state.series,
+        empty ? null : index
+      );
+      updateCursorUI();
+    },
+  });
+
+  // track pointer for tooltip position
+  for (const canvas of ['#canvas-combined', '#canvas-t', '#canvas-h', '#canvas-p']) {
+    $(canvas)?.addEventListener('pointermove', (e) => {
+      cursor.lastPointer = { x: e.clientX, y: e.clientY };
+    });
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && cursor.index != null) {
+      cursor.ctrl?.clear();
+    }
+  });
+
+  return cursor.ctrl;
+}
+
 function setStats(device) {
   const latest = device?.latest;
   $('#stat-t').textContent = latest ? fmtNum(latest.temperature, 1) : '—';
@@ -108,19 +207,36 @@ function setStats(device) {
 function renderCharts() {
   const empty = state.points.length === 0;
   $('#chart-empty').hidden = !empty;
+  $('#chart-help').hidden = empty;
   $('#chart-combined').hidden = state.view !== 'combined' || empty;
   $('#chart-split').hidden = state.view !== 'split' || empty;
   $('#chart-combined').classList.toggle('hidden', state.view !== 'combined' || empty);
   $('#chart-split').classList.toggle('hidden', state.view !== 'split' || empty);
-  if (empty) return;
+
+  ensureCursorBinding();
+  // reset selection when data set changes length / reload
+  if (empty) {
+    cursor.index = null;
+    cursor.pinned = false;
+  } else if (cursor.index != null && cursor.index >= state.points.length) {
+    cursor.index = state.points.length - 1;
+  }
+
+  if (empty) {
+    $('#chart-readout').hidden = true;
+    $('#chart-tooltip').hidden = true;
+    return;
+  }
 
   drawAll(
     $('#canvas-combined'),
     { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
     state.points,
     state.view,
-    state.series
+    state.series,
+    cursor.index
   );
+  updateCursorUI();
 }
 
 function updateChartSub() {
@@ -396,6 +512,7 @@ $$('.seg').forEach((btn) => {
     state.view = btn.dataset.view;
     $$('.seg').forEach((b) => b.classList.toggle('active', b === btn));
     renderCharts();
+    updateCursorUI();
   });
 });
 

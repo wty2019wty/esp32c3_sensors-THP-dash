@@ -144,23 +144,37 @@
             </div>
           </header>
           <div id="chart-combined" class="chart-host">
-            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图"></canvas>
+            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="悬停查看数据，点击固定，←/→ 微调"></canvas>
           </div>
           <div id="chart-split" class="chart-split hidden" hidden>
             <div class="split-item">
               <h3>温度 °C</h3>
-              <canvas id="canvas-t" width="1000" height="180"></canvas>
+              <canvas id="canvas-t" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
             </div>
             <div class="split-item">
               <h3>湿度 %RH</h3>
-              <canvas id="canvas-h" width="1000" height="180"></canvas>
+              <canvas id="canvas-h" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
             </div>
             <div class="split-item">
               <h3>气压 hPa</h3>
-              <canvas id="canvas-p" width="1000" height="180"></canvas>
+              <canvas id="canvas-p" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
             </div>
           </div>
+          <div id="chart-readout" class="chart-readout" hidden>
+            <div class="readout-time">
+              <span class="readout-label">选中时刻</span>
+              <strong id="readout-ts">—</strong>
+              <span class="readout-hint" id="readout-hint">点击可固定 · Esc 取消</span>
+            </div>
+            <div class="readout-vals">
+              <div class="rv temp"><span>温度</span><strong id="readout-t">—</strong><em>°C</em></div>
+              <div class="rv humid"><span>湿度</span><strong id="readout-h">—</strong><em>%RH</em></div>
+              <div class="rv press"><span>气压</span><strong id="readout-p">—</strong><em>hPa</em></div>
+            </div>
+          </div>
+          <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
           <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
+          <p class="chart-help" id="chart-help">在曲线上移动光标可查看该时刻数据；点击固定，再次点击或 Esc 取消；键盘 ←/→ 可逐点查看。</p>
         </section>
 
         <section class="admin-panel hidden" id="admin-panel" hidden>
