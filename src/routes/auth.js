@@ -12,8 +12,9 @@ import {
   publicUser,
   assertCsrf,
   requireUser,
+  CSRF_COOKIE,
 } from '../lib/auth.js';
-import { json, jsonError, readJson, requireString } from '../lib/http.js';
+import { json, jsonError, readJson, requireString, parseCookies } from '../lib/http.js';
 
 function applyHeaders(res, headerPairs) {
   const headers = new Headers(res.headers);
@@ -81,26 +82,14 @@ export async function logout(env, req) {
   return applyHeaders(json({ ok: true }), headers);
 }
 
-export async function me(env, req) {
-  const session = await resolveUserSession(env, req);
-  if (!session) return jsonError('未登录', 401);
-  return json({ ok: true, user: publicUser(session), csrf: session.csrfHash ? undefined : undefined });
-}
-
-/** Return me with raw csrf from cookie for SPA convenience after reload — csrf still in cookie. */
 export async function meWithCsrf(env, req) {
   const session = await resolveUserSession(env, req);
   if (!session) return jsonError('未登录', 401);
-  const cookies = Object.fromEntries(
-    (req.headers.get('cookie') || '').split(';').map((p) => {
-      const i = p.indexOf('=');
-      return i === -1 ? [p.trim(), ''] : [p.slice(0, i).trim(), decodeURIComponent(p.slice(i + 1).trim())];
-    })
-  );
+  const cookies = parseCookies(req);
   return json({
     ok: true,
     user: publicUser(session),
-    csrf: cookies['thp_csrf'] || '',
+    csrf: cookies[CSRF_COOKIE] || '',
   });
 }
 

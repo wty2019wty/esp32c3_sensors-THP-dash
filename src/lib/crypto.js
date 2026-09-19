@@ -63,7 +63,7 @@ export async function hashPassword(password) {
     keyMaterial,
     256
   );
-  return `pbkdf2$sha256${iterations}$${toHex(salt)}$${toHex(bits)}`;
+  return `pbkdf2$sha256$${iterations}$${toHex(salt)}$${toHex(bits)}`;
 }
 
 export async function verifyPassword(password, stored) {
