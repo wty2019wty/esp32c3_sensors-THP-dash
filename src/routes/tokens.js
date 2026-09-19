@@ -68,17 +68,37 @@ export async function createToken(env, req) {
   });
 }
 
+/**
+ * DELETE /api/v1/tokens/:id
+ * - 默认：吊销（active → revoked）
+ * - ?purge=1：硬删除记录（仅允许已吊销的 Token，避免误删仍在用的凭证）
+ */
 export async function revokeToken(env, req, tokenId) {
   return requireSessionAction(env, req, async (session) => {
     if (session.role !== 'admin') return jsonError('需要管理员权限', 403);
+    const url = new URL(req.url);
+    const purge =
+      url.searchParams.get('purge') === '1' || url.searchParams.get('hard') === '1';
+
     const row = await env.DB.prepare(`SELECT id, revoked_at FROM api_tokens WHERE id = ?`)
       .bind(tokenId)
       .first();
     if (!row) return jsonError('Token 不存在', 404);
-    if (row.revoked_at) return json({ ok: true, id: tokenId, status: 'already_revoked' });
-    await env.DB.prepare(`UPDATE api_tokens SET revoked_at = ? WHERE id = ?`)
-      .bind(nowIso(), tokenId)
-      .run();
-    return json({ ok: true, id: tokenId, status: 'revoked' });
+
+    if (!purge) {
+      if (row.revoked_at) return json({ ok: true, id: tokenId, status: 'already_revoked' });
+      await env.DB.prepare(`UPDATE api_tokens SET revoked_at = ? WHERE id = ?`)
+        .bind(nowIso(), tokenId)
+        .run();
+      return json({ ok: true, id: tokenId, status: 'revoked' });
+    }
+
+    if (!row.revoked_at) {
+      return jsonError('请先吊销 Token，再删除记录', 400);
+    }
+    await env.DB.prepare(`DELETE FROM api_tokens WHERE id = ?`).bind(tokenId).run();
+    return json({ ok: true, id: tokenId, status: 'deleted' });
   });
 }
+
+export const deleteToken = revokeToken;

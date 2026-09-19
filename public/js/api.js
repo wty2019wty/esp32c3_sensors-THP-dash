@@ -82,6 +82,9 @@ export const api = {
   tokens: () => request('/api/v1/tokens'),
   createToken: (payload) => request('/api/v1/tokens', { method: 'POST', body: payload }),
   revokeToken: (id) => request(`/api/v1/tokens/${encodeURIComponent(id)}`, { method: 'DELETE', body: {} }),
+  /** 硬删除已吊销的 Token 记录 */
+  purgeToken: (id) =>
+    request(`/api/v1/tokens/${encodeURIComponent(id)}?purge=1`, { method: 'DELETE', body: {} }),
   readings: (params) => {
     const q = new URLSearchParams();
     if (params.device_id) q.set('device_id', params.device_id);

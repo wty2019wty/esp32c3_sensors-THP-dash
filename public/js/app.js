@@ -175,17 +175,17 @@ async function refreshTokens() {
   for (const t of data.tokens || []) {
     const tr = document.createElement('tr');
     const badge = t.status === 'active' ? 'ok' : 'mute';
+    const actions =
+      t.status === 'active'
+        ? `<button type="button" class="btn danger" data-revoke-token="${t.id}">吊销</button>`
+        : `<button type="button" class="btn danger" data-purge-token="${t.id}">删除</button>`;
     tr.innerHTML = `
       <td>${t.id}</td>
       <td>${t.deviceName || t.deviceId}</td>
       <td>${t.name || '—'}</td>
       <td><span class="badge ${badge}">${t.status}</span></td>
       <td>${fmtTime(t.lastUsedAt)}</td>
-      <td>${
-        t.status === 'active'
-          ? `<button type="button" class="btn danger" data-revoke-token="${t.id}">吊销</button>`
-          : '—'
-      }</td>
+      <td>${actions}</td>
     `;
     tbody.appendChild(tr);
   }
@@ -509,15 +509,28 @@ $('#table-devices')?.addEventListener('click', async (e) => {
 });
 
 $('#table-tokens')?.addEventListener('click', async (e) => {
-  const id = e.target?.dataset?.revokeToken;
-  if (!id) return;
-  if (!confirm('吊销该 Token？关联设备将无法继续上报。')) return;
-  try {
-    await api.revokeToken(id);
-    await refreshTokens();
-    toast('Token 已吊销');
-  } catch (err) {
-    toast(err.message, true);
+  const revokeId = e.target?.dataset?.revokeToken;
+  const purgeId = e.target?.dataset?.purgeToken;
+  if (revokeId) {
+    if (!confirm('吊销该 Token？关联设备将无法继续上报（记录仍保留，可再删除）。')) return;
+    try {
+      await api.revokeToken(revokeId);
+      await refreshTokens();
+      toast('Token 已吊销');
+    } catch (err) {
+      toast(err.message, true);
+    }
+    return;
+  }
+  if (purgeId) {
+    if (!confirm('从数据库删除该已吊销 Token 记录？此操作不可恢复。')) return;
+    try {
+      await api.purgeToken(purgeId);
+      await refreshTokens();
+      toast('Token 记录已删除');
+    } catch (err) {
+      toast(err.message, true);
+    }
   }
 });
 

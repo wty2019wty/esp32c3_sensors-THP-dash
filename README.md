@@ -34,7 +34,7 @@ Pages Dash（自建登录会话 Cookie）
 - **人侧 API**：登录后会话 Cookie；**全部业务接口鉴权**
 - **自建登录**：用户名密码（PBKDF2），会话 14 天滑动；**不用 Cloudflare Access**
 - **首次引导**：`GET/POST /api/auth/bootstrap` 创建第一个 admin
-- **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希
+- **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**
 - **查询** `GET /api/v1/readings`：默认当天，自动降采样
 - **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`；长范围与曲线同一降采样
 - **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板
@@ -104,7 +104,8 @@ Content-Type: application/json
 | GET/POST | `/api/v1/devices` | 会话（POST 需 admin） |
 | DELETE | `/api/v1/devices/:id` | 会话 + admin |
 | GET/POST | `/api/v1/tokens` | 会话（POST 需 admin） |
-| DELETE | `/api/v1/tokens/:id` | 会话 + admin |
+| DELETE | `/api/v1/tokens/:id` | 会话 + admin（吊销） |
+| DELETE | `/api/v1/tokens/:id?purge=1` | 会话 + admin（硬删除已吊销记录） |
 | POST | `/api/v1/readings` | **设备 Token** |
 | GET | `/api/v1/readings?device_id&from&to` | 会话 |
 | GET | `/api/v1/latest?device_id=` | 会话 |

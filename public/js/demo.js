@@ -124,7 +124,22 @@ export async function handle(path, method, body) {
     };
   }
   if (method === 'DELETE' && /\/api\/v1\/tokens\//.test(path)) {
-    return { ok: true, status: 'revoked' };
+    const purge = path.includes('purge=1');
+    const id = path.split('?')[0].split('/').pop();
+    const t = db.tokens.find((x) => x.id === id);
+    if (!t) return { error: 'Token 不存在', status: 404 };
+    if (!purge) {
+      t.status = 'revoked';
+      t.revokedAt = t.revokedAt || new Date().toISOString();
+      localStorage.setItem(KEY, JSON.stringify(db));
+      return { ok: true, id, status: t.revokedAt ? 'revoked' : 'revoked' };
+    }
+    if (t.status === 'active') {
+      return { error: '请先吊销 Token，再删除记录', status: 400 };
+    }
+    db.tokens = db.tokens.filter((x) => x.id !== id);
+    localStorage.setItem(KEY, JSON.stringify(db));
+    return { ok: true, id, status: 'deleted' };
   }
   if (path.startsWith('/api/v1/readings') && method === 'GET') {
     const url = new URL(path, 'https://demo.local');
