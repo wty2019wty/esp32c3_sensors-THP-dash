@@ -1,0 +1,32 @@
+build
+sdkconfig
+sdkconfig.old
+managed_components
+
+
+
+.vscode/
+.opencode
+.reasonix/
+
+
+# Tencent Cloud EdgeOne
+.env
+.edgeone/*
+.tef_dist/*
+
+# Node
+node_modules/
+dist/
+*.local
+.node-v24.19.0-win-x64/
+.node-global/
+.npm-cache/
+.node-corepack/
+.xdg-cache/
+
+
+
+# Wrangler
+.wrangler/
+.dev.vars
