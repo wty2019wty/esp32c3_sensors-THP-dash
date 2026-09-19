@@ -79,7 +79,13 @@ export async function ingestReading(env, req) {
     return jsonError('device_id 与 Token 绑定设备不一致', 403);
   }
 
-  const ts = nowIso();
+  let ts = nowIso();
+  // Optional client ts for tests/backfill; production devices omit it (server time authoritative).
+  if (body?.ts && isValidIso(body.ts)) {
+    ts = normalizeIso(body.ts);
+  } else if (body?.measured_at && isValidIso(body.measured_at) && body?.use_measured_at === true) {
+    ts = normalizeIso(body.measured_at);
+  }
   const v = checked.values;
   await env.DB.prepare(
     `INSERT INTO readings (device_id, ts, temperature, humidity, pressure, measured_at, rssi)

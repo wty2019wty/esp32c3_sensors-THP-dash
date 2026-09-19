@@ -27,6 +27,8 @@ Pages Dash（自建登录会话 Cookie）
 | `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
 | `REQUIREMENTS.md` | 完整需求与已拍板决策 |
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
+| `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
+| `tools/local_e2e.py` | 本地登录→建设备→Token→上报 冒烟 |
 
 ## 功能对照
 
@@ -212,9 +214,14 @@ Invoke-RestMethod http://127.0.0.1:8787/api/v1/devices -WebSession $session
 **模拟设备上报（需先在 Dash 生成 Token）：**
 
 ```powershell
-$token = 'thp_粘贴你生成的明文'
+# 推荐：Python 测试脚本（标准库，无需 pip）
+python tools/submit_readings.py --health
+python tools/submit_readings.py --token thp_粘贴明文 --count 3 -v
+python tools/submit_readings.py --token thp_xxx --backfill-hours 24 --interval-min 5
+python tools/submit_readings.py --token thp_xxx --loop --interval 30
+# 或手动 Invoke-RestMethod：
 Invoke-RestMethod -Method POST http://127.0.0.1:8787/api/v1/readings `
-  -Headers @{ Authorization = "Bearer $token" } `
+  -Headers @{ Authorization = "Bearer thp_xxx" } `
   -ContentType 'application/json' `
   -Body '{"temperature":23.5,"humidity":48.2,"pressure":1013.2}'
 ```
