@@ -1,0 +1,3 @@
+# Copy to .dev.vars for `wrangler dev` (local secrets / notes)
+# After `wrangler login` + create D1, put the real id into wrangler.jsonc
+# THP_BOOTSTRAP_NOTE=Create the first admin from the Dash bootstrap page on first run

@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="dark" />
+  <title>THP Dash · 温湿度气压监控</title>
+  <link rel="stylesheet" href="./css/app.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Bootstrap -->
+    <section id="view-bootstrap" class="auth-view hidden" hidden>
+      <div class="auth-card">
+        <p class="eyebrow">首次初始化</p>
+        <h1>创建管理员</h1>
+        <p class="hint">系统中尚无用户。请创建第一个 admin 账号，用于登录 Dash 与管理设备 Token。</p>
+        <form id="form-bootstrap" autocomplete="off">
+          <label class="field">
+            <span>用户名</span>
+            <input name="username" required minlength="2" maxlength="64" pattern="[A-Za-z0-9._\-]+" />
+          </label>
+          <label class="field">
+            <span>密码（至少 8 位）</span>
+            <input name="password" type="password" required minlength="8" maxlength="128" />
+          </label>
+          <label class="field">
+            <span>确认密码</span>
+            <input name="password2" type="password" required minlength="8" maxlength="128" />
+          </label>
+          <p class="form-error" id="bootstrap-error" role="alert" hidden></p>
+          <button type="submit" class="btn primary block">创建并登录</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- Login -->
+    <section id="view-login" class="auth-view hidden" hidden>
+      <div class="auth-card">
+        <p class="eyebrow">THP Dash</p>
+        <h1>登录</h1>
+        <p class="hint">查看温湿度气压数据、导出 CSV、管理设备上报 Token。</p>
+        <form id="form-login" autocomplete="username">
+          <label class="field">
+            <span>用户名</span>
+            <input name="username" required autocomplete="username" />
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input name="password" type="password" required autocomplete="current-password" />
+          </label>
+          <p class="form-error" id="login-error" role="alert" hidden></p>
+          <button type="submit" class="btn primary block">登录</button>
+        </form>
+        <p class="hint small" id="demo-hint" hidden>
+          本地预览可使用 <button type="button" class="linkish" id="btn-demo">演示模式</button>（模拟数据，不连云端）。
+        </p>
+      </div>
+    </section>
+
+    <!-- Main app -->
+    <section id="view-app" class="app-view hidden" hidden>
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"></span>
+          <div>
+            <strong>THP Dash</strong>
+            <span class="brand-sub" id="user-label"></span>
+          </div>
+        </div>
+        <div class="topbar-controls">
+          <label class="inline">
+            <span>设备</span>
+            <select id="sel-device"></select>
+          </label>
+          <label class="inline">
+            <span>范围</span>
+            <select id="sel-range">
+              <option value="today" selected>当天</option>
+              <option value="24h">近 24 小时</option>
+              <option value="7d">近 7 天</option>
+              <option value="30d">近 30 天</option>
+              <option value="90d">近 90 天</option>
+              <option value="365d">近 1 年</option>
+              <option value="custom">自定义…</option>
+            </select>
+          </label>
+          <div id="custom-range" class="custom-range hidden" hidden>
+            <input type="datetime-local" id="inp-from" />
+            <span class="sep">→</span>
+            <input type="datetime-local" id="inp-to" />
+            <button type="button" class="btn ghost" id="btn-apply-range">应用</button>
+          </div>
+          <div class="segmented" role="group" aria-label="视图模式">
+            <button type="button" class="seg active" data-view="combined" id="btn-view-combined">综合</button>
+            <button type="button" class="seg" data-view="split" id="btn-view-split">分项</button>
+          </div>
+          <button type="button" class="btn" id="btn-export">导出 CSV</button>
+          <button type="button" class="btn ghost" id="btn-admin" hidden>管理</button>
+          <button type="button" class="btn ghost" id="btn-logout">退出</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="stats" id="stats">
+          <article class="stat temp">
+            <header>温度</header>
+            <p class="stat-value"><span id="stat-t">—</span><span class="unit">°C</span></p>
+            <p class="stat-meta" id="stat-t-meta">SHT40</p>
+          </article>
+          <article class="stat humid">
+            <header>湿度</header>
+            <p class="stat-value"><span id="stat-h">—</span><span class="unit">%RH</span></p>
+            <p class="stat-meta" id="stat-h-meta">SHT40</p>
+          </article>
+          <article class="stat press">
+            <header>气压</header>
+            <p class="stat-value"><span id="stat-p">—</span><span class="unit">hPa</span></p>
+            <p class="stat-meta" id="stat-p-meta">BMP280</p>
+          </article>
+          <article class="stat device">
+            <header>设备状态</header>
+            <p class="stat-value small" id="stat-device">—</p>
+            <p class="stat-meta" id="stat-seen">—</p>
+          </article>
+        </section>
+
+        <section class="chart-panel">
+          <header class="panel-head">
+            <div>
+              <h2 id="chart-title">温湿度气压</h2>
+              <p class="panel-sub" id="chart-sub">默认当天 · 自动粒度</p>
+            </div>
+            <div class="legend" id="legend">
+              <button type="button" class="legend-item active" data-series="temperature">
+                <i style="background:var(--temp)"></i>温度
+              </button>
+              <button type="button" class="legend-item active" data-series="humidity">
+                <i style="background:var(--humid)"></i>湿度
+              </button>
+              <button type="button" class="legend-item active" data-series="pressure">
+                <i style="background:var(--press)"></i>气压
+              </button>
+            </div>
+          </header>
+          <div id="chart-combined" class="chart-host">
+            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图"></canvas>
+          </div>
+          <div id="chart-split" class="chart-split hidden" hidden>
+            <div class="split-item">
+              <h3>温度 °C</h3>
+              <canvas id="canvas-t" width="1000" height="180"></canvas>
+            </div>
+            <div class="split-item">
+              <h3>湿度 %RH</h3>
+              <canvas id="canvas-h" width="1000" height="180"></canvas>
+            </div>
+            <div class="split-item">
+              <h3>气压 hPa</h3>
+              <canvas id="canvas-p" width="1000" height="180"></canvas>
+            </div>
+          </div>
+          <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
+        </section>
+
+        <section class="admin-panel hidden" id="admin-panel" hidden>
+          <header class="panel-head">
+            <h2>设备与 Token</h2>
+            <div class="admin-actions">
+              <button type="button" class="btn" id="btn-new-device">新建设备</button>
+              <button type="button" class="btn primary" id="btn-new-token">生成上报 Token</button>
+            </div>
+          </header>
+          <div class="admin-grid">
+            <div>
+              <h3>设备</h3>
+              <div class="table-wrap">
+                <table class="data-table" id="table-devices">
+                  <thead>
+                    <tr><th>ID</th><th>名称</th><th>状态</th><th>最近上报</th><th></th></tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+            <div>
+              <h3>上报 Token</h3>
+              <div class="table-wrap">
+                <table class="data-table" id="table-tokens">
+                  <thead>
+                    <tr><th>ID</th><th>设备</th><th>名称</th><th>状态</th><th>最近使用</th><th></th></tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <div class="toast" id="toast" role="status" hidden></div>
+    </section>
+  </div>
+
+  <!-- Modal: create device -->
+  <dialog id="dlg-device" class="dlg">
+    <form method="dialog" id="form-device">
+      <h2>新建设备</h2>
+      <label class="field"><span>设备 ID</span><input name="id" placeholder="dev_lab1" pattern="[A-Za-z0-9_-]{2,64}" /></label>
+      <label class="field"><span>名称</span><input name="name" required maxlength="64" placeholder="实验室一号" /></label>
+      <p class="form-error" id="device-error" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary">创建</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: create token -->
+  <dialog id="dlg-token" class="dlg">
+    <form method="dialog" id="form-token">
+      <h2>生成上报 Token</h2>
+      <p class="hint">Token 仅用于设备 HTTPS 上报，明文只显示一次。</p>
+      <label class="field">
+        <span>设备</span>
+        <select name="deviceId" id="token-device" required></select>
+      </label>
+      <label class="field"><span>备注名称（可选）</span><input name="name" maxlength="64" placeholder="bench-01" /></label>
+      <p class="form-error" id="token-error" hidden></p>
+      <div class="dlg-actions">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary">生成</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Modal: token secret once -->
+  <dialog id="dlg-secret" class="dlg">
+    <div>
+      <h2>保存 Token</h2>
+      <p class="warn-box">关闭后将无法再次查看。请立即写入设备配置。</p>
+      <pre class="secret-box" id="secret-value"></pre>
+      <div class="dlg-actions">
+        <button type="button" class="btn" id="btn-copy-secret">复制</button>
+        <button type="button" class="btn primary" data-close>我已保存</button>
+      </div>
+    </div>
+  </dialog>
+
+  <script type="module" src="./js/app.js"></script>
+</body>
+</html>
