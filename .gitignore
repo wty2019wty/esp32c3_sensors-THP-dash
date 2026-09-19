@@ -31,3 +31,4 @@ dist/
 .wrangler/
 .dev.vars
 wrangler-dev.log
+wrangler-dev.err.log
