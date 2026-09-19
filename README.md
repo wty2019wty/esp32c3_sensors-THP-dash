@@ -17,6 +17,12 @@ Pages Dash（自建登录会话 Cookie）
     设备选择 / 当天默认·可选范围 / 综合·分项图 / CSV / Token 管理
 ```
 
+## 界面预览
+
+桌面端 Dash（1280px，演示模式：当前值卡片、综合三线图、选中时刻拾取、设备与 Token 管理）：
+
+![THP Dash 桌面端界面](./desktop-1280.png)
+
 ## 目录
 
 | 路径 | 说明 |
@@ -25,6 +31,7 @@ Pages Dash（自建登录会话 Cookie）
 | `wrangler.jsonc` | Worker + D1 + 静态资源绑定 |
 | `src/` | Worker 源码（鉴权、上报、查询、降采样、CSV） |
 | `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
+| `desktop-1280.png` | Dash 桌面端界面预览（README「界面预览」） |
 | `REQUIREMENTS.md` | 完整需求与已拍板决策 |
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
 | `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
