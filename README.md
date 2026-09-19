@@ -68,6 +68,7 @@ npx wrangler d1 execute thp-dash --file=./schema.sql --remote
 ```powershell
 npm install
 npm run dev
+npx wrangler dev
 ```
 
 打开控制台提示的本地 URL：
