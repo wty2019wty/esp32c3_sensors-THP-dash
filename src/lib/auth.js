@@ -10,6 +10,7 @@ import {
   timingSafeEqualHex,
 } from './crypto.js';
 import { parseCookies, serializeCookie, getQuery } from './http.js';
+import { ensureSchemaAndCountUsers, isMissingTableError } from './schema.js';
 
 export const SESSION_COOKIE = 'thp_session';
 export const CSRF_COOKIE = 'thp_csrf';
@@ -121,8 +122,13 @@ export async function assertCsrf(env, req, session) {
 }
 
 export async function countUsers(env) {
-  const row = await env.DB.prepare(`SELECT COUNT(*) AS c FROM users`).first();
-  return Number(row?.c || 0);
+  try {
+    const row = await env.DB.prepare(`SELECT COUNT(*) AS c FROM users`).first();
+    return Number(row?.c || 0);
+  } catch (err) {
+    if (isMissingTableError(err)) return ensureSchemaAndCountUsers(env);
+    throw err;
+  }
 }
 
 export async function createUser(env, { username, password, role = 'admin' }) {

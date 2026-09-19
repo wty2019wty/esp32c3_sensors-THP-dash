@@ -5,11 +5,13 @@
   "type": "module",
   "description": "ESP32-C3 THP monitoring — Cloudflare Worker + D1 + Pages Dash",
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev --local",
+    "dev:8787": "wrangler dev --local --ip 127.0.0.1 --port 8787",
     "deploy": "wrangler deploy",
     "db:local": "wrangler d1 execute thp-dash --file=./schema.sql --local",
     "db:remote": "wrangler d1 execute thp-dash --file=./schema.sql --remote",
-    "check": "node --check src/index.js && node --check src/lib/crypto.js && node --check src/lib/auth.js && node --check src/lib/http.js && node --check src/lib/downsample.js && node --check src/lib/csv.js && node --check src/routes/auth.js && node --check src/routes/devices.js && node --check src/routes/tokens.js && node --check src/routes/readings.js && node --check src/routes/export.js"
+    "db:tables": "wrangler d1 execute thp-dash --local --command \"SELECT name FROM sqlite_master WHERE type='table' ORDER BY name\"",
+    "check": "node --check src/index.js && node --check src/lib/crypto.js && node --check src/lib/auth.js && node --check src/lib/http.js && node --check src/lib/downsample.js && node --check src/lib/csv.js && node --check src/lib/schema.js && node --check src/routes/auth.js && node --check src/routes/devices.js && node --check src/routes/tokens.js && node --check src/routes/readings.js && node --check src/routes/export.js"
   },
   "devDependencies": {
     "wrangler": "^4.24.0"

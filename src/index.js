@@ -55,6 +55,9 @@ async function handle(req, env, path, method, url) {
   if (path === '/api/auth/bootstrap' && method === 'POST') {
     return authRoutes.bootstrapCreate(env, req);
   }
+  if (path === '/api/auth/migrate' && method === 'POST') {
+    return authRoutes.migrate(env);
+  }
   if (path === '/api/auth/login' && method === 'POST') {
     return authRoutes.login(env, req);
   }

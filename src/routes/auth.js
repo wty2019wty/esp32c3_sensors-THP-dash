@@ -2,7 +2,6 @@ import {
   createSession,
   destroySession,
   resolveUserSession,
-  countUsers,
   createUser,
   findUserByUsername,
   verifyPassword,
@@ -15,6 +14,7 @@ import {
   CSRF_COOKIE,
 } from '../lib/auth.js';
 import { json, jsonError, readJson, requireString, parseCookies } from '../lib/http.js';
+import { ensureSchemaAndCountUsers, ensureSchema } from '../lib/schema.js';
 
 function applyHeaders(res, headerPairs) {
   const headers = new Headers(res.headers);
@@ -23,12 +23,18 @@ function applyHeaders(res, headerPairs) {
 }
 
 export async function bootstrapStatus(env) {
-  const n = await countUsers(env);
+  const n = await ensureSchemaAndCountUsers(env);
   return json({ needsBootstrap: n === 0 });
 }
 
+/** POST /api/auth/migrate — create tables if missing (local debug helper). */
+export async function migrate(env) {
+  await ensureSchema(env);
+  return json({ ok: true, migrated: true });
+}
+
 export async function bootstrapCreate(env, req) {
-  const existing = await countUsers(env);
+  const existing = await ensureSchemaAndCountUsers(env);
   if (existing > 0) return jsonError('系统已初始化，无法再次引导创建', 403);
   const body = await readJson(req);
   const usernameError = requireString(body?.username, 'username', { min: 2, max: 64 });

@@ -26,6 +26,7 @@ Pages Dash（自建登录会话 Cookie）
 | `src/` | Worker 源码（鉴权、上报、查询、降采样、CSV） |
 | `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
 | `REQUIREMENTS.md` | 完整需求与已拍板决策 |
+| `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
 
 ## 功能对照
 
@@ -63,32 +64,16 @@ npx wrangler d1 execute thp-dash --file=./schema.sql --local
 npx wrangler d1 execute thp-dash --file=./schema.sql --remote
 ```
 
-### 4. 本地开发
-
-```powershell
-npm install
-npm run dev
-npx wrangler dev
-```
-
-打开控制台提示的本地 URL：
-
-1. 进入 **首次初始化**，创建 admin  
-2. 登录 → **管理** → 新建设备 → **生成上报 Token**（仅显示一次）  
-3. 图表、导出、Token 吊销均可在 Dash 操作  
-
-无 Worker 时：打开 `public/index.html`，点 **演示模式**（或 URL 加 `?demo=1`）预览界面。
-
-### 5. 部署
+### 4. 部署到 Cloudflare
 
 ```powershell
 npm run deploy
-npx wrangler d1 execute thp-dash --file=./schema.sql --remote
+npm run db:remote
 ```
 
-部署后首次访问站点创建 admin，再按上节配置设备 Token。
+部署后首次访问站点创建 admin，再按「本地调试」中的步骤配置设备与 Token。
 
-### 6. 设备上报（概念）
+### 5. 设备上报（概念）
 
 ```http
 POST /api/v1/readings
@@ -112,6 +97,7 @@ Content-Type: application/json
 |------|------|------|
 | GET | `/api/health` | 无（存活探测） |
 | GET/POST | `/api/auth/bootstrap` | 无（仅库内无用户时可创建） |
+| POST | `/api/auth/migrate` | 无（幂等建表，本地调试用） |
 | POST | `/api/auth/login` | 无 |
 | POST | `/api/auth/logout` | 会话 + CSRF |
 | GET | `/api/auth/me` | 会话 |
@@ -125,6 +111,176 @@ Content-Type: application/json
 | GET | `/api/v1/export?device_id&from&to` | 会话 |
 
 写操作（登录后的 POST/DELETE）需请求头 `X-CSRF-Token`（Dash 自动从 Cookie `thp_csrf` 带上）。
+
+---
+
+## 本地调试（Windows / wrangler dev）
+
+本地开发**不需要** Cloudflare 账号、真实 `database_id`，也不连线上 D1。
+
+### 原理
+
+| 项目 | 本地行为 |
+|------|----------|
+| Worker | `wrangler dev` 在本机跑 Miniflare/workerd |
+| D1 | 项目下 SQLite 文件：`.wrangler/state/v3/d1/miniflare-D1DatabaseObject/...` |
+| 静态 Dash | `public/` 由 Worker Assets 提供，同源访问 `/api/*` |
+| `wrangler.jsonc` 中的 `database_id` | **本地可保持占位符**；仅 `deploy` / `--remote` 需要真实 id |
+
+本地 D1 与线上完全隔离：删掉 `.wrangler/` 等于清空本地库，不会影响线上。
+
+### 标准流程（从零到能看图）
+
+在项目根目录 `G:\esp32s3\esp32c3_sensors-THP-dash`：
+
+```powershell
+# 0) 进入 Node 环境（本仓库自带；若 PATH 已有 node/npm 可跳过）
+. .\node_env.ps1
+
+# 1) 安装依赖（首次）
+npm install
+
+# 2) 对【本地】D1 建表（必须；否则 no such table: users）
+npm run db:local
+
+# 3) 启动本地服务
+npm run dev
+# 等价：npx wrangler dev --local
+# 指定端口：npx wrangler dev --local --ip 127.0.0.1 --port 8787
+```
+
+终端出现 `Ready on http://127.0.0.1:8787` 后，用浏览器打开该地址：
+
+1. 首次进入 **初始化** 页 → 创建 admin 用户名/密码（≥8 位）  
+2. 自动或手动 **登录** 进入 Dash  
+3. **管理** → **新建设备**（如 `dev_lab1` + 名称）  
+4. **生成上报 Token** → 明文**只显示一次**，先保存  
+5. 选择设备与时间范围，查看综合/分项曲线、当前值  
+6. **导出 CSV**、吊销 Token 等均可本地联调  
+
+### npm 脚本
+
+| 脚本 | 命令展开 | 用途 |
+|------|----------|------|
+| `npm run db:local` | `wrangler d1 execute thp-dash --file=./schema.sql --local` | 本地建表 |
+| `npm run db:remote` | 同上 `--remote` | 线上建表 |
+| `npm run dev` | `wrangler dev` | 本地开发服务 |
+| `npm run deploy` | `wrangler deploy` | 部署 Worker |
+| `npm run check` | `node --check src/...` | 源码语法检查 |
+
+### 本地 HTTP 探测（PowerShell）
+
+服务启动后另开一个终端：
+
+```powershell
+# 存活
+Invoke-RestMethod http://127.0.0.1:8787/api/health
+
+# 是否需要创建第一个用户（false=已有用户）
+Invoke-RestMethod http://127.0.0.1:8787/api/auth/bootstrap
+
+# Dash 是否可访问
+(Invoke-WebRequest http://127.0.0.1:8787/ -UseBasicParsing).StatusCode
+```
+
+**手动建表（不依赖页面）：**
+
+```powershell
+Invoke-RestMethod -Method POST http://127.0.0.1:8787/api/auth/migrate
+```
+
+**创建 admin（引导接口，仅库内无用户时可用）：**
+
+```powershell
+$body = @{ username = 'admin'; password = 'change-me-now' } | ConvertTo-Json
+Invoke-RestMethod -Method POST http://127.0.0.1:8787/api/auth/bootstrap -ContentType 'application/json' -Body $body
+```
+
+**登录并保存 Cookie（后续带 Cookie + CSRF 调业务 API）：**
+
+```powershell
+$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+$login = Invoke-RestMethod -Method POST http://127.0.0.1:8787/api/auth/login `
+  -ContentType 'application/json' -WebSession $session `
+  -Body (@{ username='admin'; password='change-me-now' } | ConvertTo-Json)
+$csrf = $login.csrf
+Invoke-RestMethod http://127.0.0.1:8787/api/auth/me -WebSession $session
+Invoke-RestMethod http://127.0.0.1:8787/api/v1/devices -WebSession $session
+```
+
+**模拟设备上报（需先在 Dash 生成 Token）：**
+
+```powershell
+$token = 'thp_粘贴你生成的明文'
+Invoke-RestMethod -Method POST http://127.0.0.1:8787/api/v1/readings `
+  -Headers @{ Authorization = "Bearer $token" } `
+  -ContentType 'application/json' `
+  -Body '{"temperature":23.5,"humidity":48.2,"pressure":1013.2}'
+```
+
+**查询曲线 / 导出 CSV：**
+
+```powershell
+# 需已登录（-WebSession $session）并带上 $csrf 时写操作才需要
+Invoke-RestMethod "http://127.0.0.1:8787/api/v1/readings?device_id=dev_lab1" -WebSession $session
+Invoke-WebRequest "http://127.0.0.1:8787/api/v1/export?device_id=dev_lab1" -WebSession $session -OutFile thp_export.csv
+```
+
+### 本地 SQL（wrangler d1 --local）
+
+```powershell
+# 列出本地表
+npx wrangler d1 execute thp-dash --local --command "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+
+# 设备与 Token
+npx wrangler d1 execute thp-dash --local --command "SELECT id,name,status,last_seen_at FROM devices"
+npx wrangler d1 execute thp-dash --local --command "SELECT id,device_id,revoked_at FROM api_tokens"
+
+# 最近读数
+npx wrangler d1 execute thp-dash --local --command "SELECT ts,temperature,humidity,pressure FROM readings ORDER BY ts DESC LIMIT 10"
+
+# 用户数 / 会话数
+npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM users) AS users, (SELECT COUNT(*) FROM sessions) AS sessions"
+```
+
+### 演示模式（不启 Worker）
+
+只想看 UI、不连 API 时：
+
+1. 用浏览器直接打开 `public/index.html`，或  
+2. 在已部署/本地站点 URL 后加 `?demo=1`  
+
+登录页出现后点击 **演示模式**：使用 `public/js/demo.js` 的本地模拟数据（设备、约 24h 曲线、假 Token、CSV 下载）。  
+**不会**写入 D1，也不能验证真实鉴权/上报。
+
+### 常见问题
+
+| 现象 | 原因 | 处理 |
+|------|------|------|
+| `no such table: users` | 本地 D1 未建表 | `npm run db:local`；或 `POST /api/auth/migrate`；bootstrap 路径也会自动补建 |
+| `Binding DB not found` / 配置错误 | `wrangler.jsonc` 未正确加载或未在项目根执行 | 在项目根运行 `npm run dev`；确认存在 `d1_databases` 且 `binding: "DB"` |
+| 端口被占用 | 8787 已被占用 | `npx wrangler dev --local --port 8788` |
+| 登录 401「用户名或密码错误」 | 未引导创建用户，或密码不对 | `GET /api/auth/bootstrap` 看 `needsBootstrap`；必要时清本地库后重建 admin |
+| 页面能开但接口 401 | 未登录或会话过期 | 重新登录；写操作需 Dash 自动带的 `X-CSRF-Token` |
+| 上报 401 | Token 错误/已吊销 | 在 Dash 重新生成 Token |
+| 上报 400 | 字段超范围 | 温度 −40–85°C，湿度 0–100%，气压 300–1200 hPa |
+| 改了 `schema.sql` 本地表没变 | DDL 不会自动重放 | 手动再执行 `npm run db:local`，或删 `.wrangler` 后重建（本地数据会清空） |
+| 想重置本地数据 | — | 停止 `wrangler dev` → 删除 `.wrangler/` → `npm run db:local` → 重新引导 admin |
+| 线上 deploy 报 D1 id 无效 | 仍是占位符 | `wrangler d1 create thp-dash` 后把真实 id 写入 `wrangler.jsonc`，再 `db:remote` |
+
+### 本地调试检查清单
+
+- [ ] `npm run db:local` 成功  
+- [ ] `npm run dev` 显示 Ready  
+- [ ] `/api/health` 返回 `ok: true`  
+- [ ] `/api/auth/bootstrap` 返回 JSON（而不是 500）  
+- [ ] 浏览器可创建 admin 并登录  
+- [ ] 能新建设备、生成 Token  
+- [ ] 用 Token `POST /api/v1/readings` 返回 201  
+- [ ] Dash 出现当前值与曲线  
+- [ ] CSV 导出文件含表头 `timestamp,temperature,humidity,pressure`  
+
+---
 
 ## 自动降采样（v1）
 
