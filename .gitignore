@@ -35,3 +35,6 @@ __pycache__/
 .dev.vars
 wrangler-dev.log
 wrangler-dev.err.log
+
+# ESP32-C3 固件本地密钥（Wi-Fi / 设备 Token）
+ESP32/main/thp_config.h

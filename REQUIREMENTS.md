@@ -475,7 +475,7 @@ Dash 默认范围：**当天**（产品时区下的本地日界 → 当前时刻
 5. 人侧查询 API + **自动降采样**  
 6. Pages Dash：登录、设备选择、时间范围、综合/分项图、当前值  
 7. CSV 导出（同范围、同鉴权、同粒度策略 + 行数上限）  
-8. ESP32-C3 固件：SHT40+BMP280 采样 + HTTPS 上报  
+8. ESP32-C3 固件：SHT40+BMP280 采样 + HTTPS 上报（**已交付** → `ESP32/`）  
 9. 备份与运维：D1 定期导出说明  
 
 ---
@@ -483,13 +483,37 @@ Dash 默认范围：**当天**（产品时区下的本地日界 → 当前时刻
 ## 16. 验收要点（实现完成后对照）
 
 - [ ] 未登录不能打开数据 API；未持设备 Token 不能 POST 读数  
-- [ ] 5 分钟上报落库，字段口径：T/H 来自 SHT40，P 来自 BMP280  
+- [ ] 5 分钟上报落库，字段口径：T/H 来自 SHT40，P 来自 BMP280（固件实现见 `ESP32/main/main.c`，口径在采样与 JSON 组装处强制）  
 - [ ] 库中原始行永久保留；长范围查询自动降粗并在 UI 标明  
 - [ ] Dash 默认当天；可切换综合/分项；数据同一套查询结果  
 - [ ] 可生成设备 Token（仅一次明文）、可吊销、吊销后上报失败  
 - [ ] 可新增第二台设备而无需改架构  
 - [ ] CSV 列顺序正确；当天为原始点，长范围为降采样点；鉴权正确  
 - [ ] 登录、会话、CSRF、Token 哈希等安全项符合第 12 节  
+
+---
+
+---
+
+## 17. 实现状态（对照交付物）
+
+| 模块 | 状态 | 位置 |
+|------|------|------|
+| Cloudflare Worker API + D1 | 已实现 | `src/` · `schema.sql` · `wrangler.jsonc` |
+| Web Dash（登录/曲线/CSV/Token） | 已实现 | `public/` |
+| 本地联调工具 | 已实现 | `tools/submit_readings.py` · `tools/local_e2e.py` |
+| ESP32-C3 固件上报 | 已实现 | `ESP32/`（配置模板 `main/thp_config.h.example`） |
+| D1 线上 `database_id` | 待运维 | `wrangler.jsonc` 仍为占位符时需 `wrangler d1 create` 后回填 |
+| 真机 Token 联调 | 待操作 | Dash 生成 Token → 填入 `ESP32/main/thp_config.h` → 烧录 |
+
+固件实现时对需求的硬约束对齐：
+
+1. **量测口径**：业务 `temperature`/`humidity` 只取 SHT40；`pressure` 只取 BMP280；BMP 内部温度不进 JSON。  
+2. **上报节奏**：默认 `THP_REPORT_PERIOD_MS = 5*60*1000`。  
+3. **鉴权**：仅 `Authorization: Bearer <device_token>`；不使用用户会话。  
+4. **载荷**：`measured_at` 仅在 SNTP 同步成功时发送；`ts` 生产路径不发送（服务端时间权威）。  
+5. **重试**：网络/5xx 有限次退避；401/403/400 不重试（§10）。  
+6. **密钥**：`ESP32/main/thp_config.h` 不入库（§12.7），仓库仅保留 `.example` 模板。
 
 ---
 

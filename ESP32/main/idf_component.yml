@@ -1,0 +1,4 @@
+## 组件依赖清单
+## 仅使用 ESP-IDF 内置组件（Wi-Fi / HTTP / SNTP / mbedTLS），无需外部注册表依赖。
+dependencies:
+  idf: ">=5.1"

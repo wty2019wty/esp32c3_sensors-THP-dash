@@ -1,0 +1,54 @@
+/*
+ * THP 上报本地配置模板
+ *
+ * 用法：
+ *   copy thp_config.h.example thp_config.h
+ *   填入真实 Wi-Fi 与设备 Token 后再编译烧录。
+ *
+ * 安全（REQUIREMENTS.md §12.7）：
+ *   thp_config.h 已被 .gitignore 忽略，明文 Token / 密码不得提交到仓库。
+ *   Token 在 Dash「管理 → 生成上报 Token」获得，明文只显示一次。
+ */
+#pragma once
+
+/* ---------------- Wi-Fi STA ---------------- */
+#define THP_WIFI_SSID           "your-wifi-ssid"
+#define THP_WIFI_PASSWORD       "your-wifi-password"
+
+/* 最长等待 Wi-Fi 连接成功的时间（毫秒）；超时后进入重试循环 */
+#define THP_WIFI_CONNECT_TIMEOUT_MS  30000
+
+/* ---------------- THP API ----------------
+ * 本地 wrangler dev 示例：
+ *   http://192.168.1.10:8787
+ * 线上 Workers 示例：
+ *   https://thp-dash.<your-subdomain>.workers.dev
+ * 固件会自动在末尾拼接 /api/v1/readings
+ */
+#define THP_API_BASE            "http://127.0.0.1:8787"
+
+/* 设备上报 Token（Bearer，形如 thp_xxx）。在 Dash 登录后生成。 */
+#define THP_DEVICE_TOKEN        "thp_replace_me"
+
+/* 可选：设备 ID。必须与 Token 绑定设备一致；留空则不发送该字段
+ * （服务端以 Token 绑定的 device_id 为准，见 REQUIREMENTS.md §4.4）
+ */
+#define THP_DEVICE_ID           ""
+
+/* ---------------- 上报节奏 ----------------
+ * 需求：5 分钟 / 次（288 条 / 设备 / 天）
+ */
+#define THP_REPORT_PERIOD_MS    (5 * 60 * 1000)
+
+/* Wi-Fi/NTP 就绪后首次上报前的等待（毫秒），便于串口观察初始化 */
+#define THP_REPORT_FIRST_DELAY_MS  5000
+
+/* 上报失败时的有限重试次数与基础退避（毫秒），不无限重发 */
+#define THP_REPORT_MAX_RETRIES  3
+#define THP_REPORT_RETRY_BASE_MS 2000
+
+/* SNTP 服务器（用于 measured_at；入库与查询以服务端时间为准） */
+#define THP_NTP_SERVER          "pool.ntp.org"
+
+/* 设为 1 时跳过 HTTPS 证书校验（仅本地 http 调试或自签证书排查用） */
+#define THP_HTTP_SKIP_VERIFY    0

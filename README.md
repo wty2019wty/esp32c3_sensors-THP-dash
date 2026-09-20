@@ -1,13 +1,13 @@
 # THP Dash（Cloudflare 服务端 + Dash）
 
-ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash**。  
+ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash + 设备端固件**。  
 需求基线见 [REQUIREMENTS.md](./REQUIREMENTS.md)。  
-本期交付 **Cloudflare 服务与 Web Dash**；ESP32 固件后续接入。
+云端服务与 Web Dash 见本目录；**ESP32-C3 上报固件**见 [ESP32/](./ESP32/)。
 
 ## 架构
 
 ```
-ESP32-C3 (SHT40 + BMP280)
+ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/]
     │  HTTPS POST /api/v1/readings
     │  Authorization: Bearer <device_token>
     ▼
@@ -36,6 +36,7 @@ Pages Dash（自建登录会话 Cookie）
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
 | `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
 | `tools/local_e2e.py` | 本地登录→建设备→Token→上报 冒烟 |
+| `ESP32/` | ESP32-C3 固件（SHT40+BMP280 → HTTPS 上报），见 [ESP32/README.md](./ESP32/README.md) |
 
 ## 功能对照
 
@@ -331,12 +332,18 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - CORS：默认仅同源；跨域 Dash 用环境变量 `ALLOWED_ORIGINS`（逗号分隔完整 origin）  
 - 长范围查询/导出在 **SQL 侧** 自动降采样（失败时回退内存聚合）  
 
-## ESP32-C3（待做）
+## ESP32-C3 固件（已交付）
 
-- SHT40：温度、湿度  
-- BMP280：气压  
-- 每 5 分钟 HTTPS 上报 + Bearer Token  
-- 参考 `REQUIREMENTS.md` §4 / §10  
+固件工程在 [`ESP32/`](./ESP32/)，说明见 [ESP32/README.md](./ESP32/README.md)。
+
+- 框架：ESP-IDF（与 `G:\esp32s3\esp32c3_sensors` 同风格，自研 `sht40` / `bmp280` 驱动）
+- 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
+- 节奏：默认 5 分钟 HTTPS `POST /api/v1/readings` + Bearer Token
+- 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**）
+- 重试：网络与 5xx 有限退避；401/403/400 不重发
+- 前置：Dash 新建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP
+
+更细的硬件、烧录与协议说明见 `ESP32/README.md`；需求条文见 `REQUIREMENTS.md` §4 / §10。
 
 ## 许可证
 

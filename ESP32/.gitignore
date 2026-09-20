@@ -1,0 +1,12 @@
+build
+sdkconfig
+sdkconfig.old
+sdkconfig.ci
+dependencies.lock
+managed_components
+
+# 本地密钥与 Wi-Fi 配置，禁止入库
+main/thp_config.h
+
+.vscode/
+.idea/

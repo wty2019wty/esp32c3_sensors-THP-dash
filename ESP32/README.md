@@ -1,0 +1,138 @@
+# ESP32-C3 固件：THP HTTPS 上报
+
+设备端采样并上报到本仓库云端 Worker（`POST /api/v1/readings`）。  
+硬件与量测口径遵循根目录 [REQUIREMENTS.md](../REQUIREMENTS.md) §4 / §10；驱动风格与参考工程 `G:\esp32s3\esp32c3_sensors` 对齐（ESP-IDF，新版 `i2c_master`）。
+
+## 1. 硬件
+
+| 器件 | 作用 | I2C |
+| --- | --- | --- |
+| ESP32-C3（如 Super Mini） | MCU + Wi-Fi | — |
+| SHT40 | **温度、湿度** | 0x44（备用 0x45） |
+| BMP280 / GY-91 | **气压** | 0x76（备用 0x77） |
+
+接线（与参考工程相同）：
+
+| 信号 | GPIO |
+| --- | --- |
+| SDA | GPIO8 |
+| SCL | GPIO9 |
+| VCC | **3.3V（严禁 5V）** |
+| GND | GND |
+
+量测口径（必须遵守）：
+
+- `temperature` / `humidity` **仅**来自 SHT40  
+- `pressure` **仅**来自 BMP280（hPa）  
+- BMP280 内部温度**不写入**业务字段，仅用于气压补偿  
+
+## 2. 目录
+
+```
+ESP32/
+├── CMakeLists.txt
+├── sdkconfig.defaults          # C3 / 4MB / 关蓝牙 / TLS 证书捆绑包
+├── main/
+│   ├── main.c                  # I2C + Wi-Fi + SNTP + HTTPS 上报
+│   ├── i2c_config.h            # SDA/SCL/速率
+│   ├── thp_config.h.example    # 配置模板
+│   └── thp_config.h            # 本地真实配置（gitignored，勿提交）
+└── components/
+    ├── sht40/                  # 温湿度驱动（CRC-8）
+    └── bmp280/                 # 气压驱动（0x76/0x77，t_fine 补偿）
+```
+
+## 3. 配置
+
+```powershell
+cd ESP32
+copy main\thp_config.h.example main\thp_config.h
+```
+
+编辑 `main/thp_config.h`：
+
+| 宏 | 说明 |
+| --- | --- |
+| `THP_WIFI_SSID` / `THP_WIFI_PASSWORD` | STA Wi-Fi |
+| `THP_API_BASE` | Worker 根地址，**不含** `/api/...`。本地：`http://<电脑局域网IP>:8787`；线上：`https://xxx.workers.dev` |
+| `THP_DEVICE_TOKEN` | Dash 管理页生成的上报 Token（`thp_...`，明文只显示一次） |
+| `THP_DEVICE_ID` | 可选；须与 Token 绑定设备一致，一般留空 |
+| `THP_REPORT_PERIOD_MS` | 默认 `5*60*1000`（5 分钟，288 条/天） |
+
+> 安全：`thp_config.h` 已被 `.gitignore` 忽略；**不要**把 Token 提交进仓库（REQUIREMENTS.md §12.7）。
+
+## 4. 构建与烧录（ESP-IDF）
+
+需已安装 ESP-IDF（参考机：`D:\esp\v6.1\esp-idf`）：
+
+```powershell
+$env:PYTHONUTF8=1
+D:\esp\v6.1\esp-idf\export.ps1
+cd G:\esp32s3\esp32c3_sensors-THP-dash\ESP32
+idf.py set-target esp32c3
+idf.py build
+idf.py -p COMx flash monitor
+```
+
+将 `COMx` 换成实际串口（设备管理器 / `idf.py list-ports`）。
+
+## 5. 云端前置
+
+1. 根目录启动 Worker：`npm run db:local` + `npm run dev`（或已 `deploy`）  
+2. Dash 登录 → 管理 → **新建设备** → **生成上报 Token**  
+3. Token 粘贴到 `THP_DEVICE_TOKEN`；本地联调时 `THP_API_BASE` 用电脑局域网 IP（ESP32 访问不到你电脑的 `127.0.0.1`）  
+4. 烧录后串口应出现 `上报 HTTP 201` 与 `ok` 响应  
+
+也可用 `python tools/submit_readings.py --token thp_xxx` 先验证云端链路。
+
+## 6. 上报协议（与 Worker 一致）
+
+```http
+POST {THP_API_BASE}/api/v1/readings
+Authorization: Bearer <device_token>
+Content-Type: application/json
+
+{
+  "temperature": 23.40,
+  "humidity": 48.20,
+  "pressure": 1013.20,
+  "measured_at": "2026-01-01T12:00:00.000Z",
+  "rssi": -55
+}
+```
+
+| 项 | 固件行为 |
+| --- | --- |
+| `device_id` | 可选发送；不一致会 403。默认省略，以 Token 绑定为准 |
+| `measured_at` | NTP 同步成功才发送（ISO-8601 UTC）；失败则省略，**入库以服务端时间为准** |
+| `ts` | 生产固件不发送（避免伪造时间轴） |
+| 字段范围 | 与服务端一致：T −40~85，H 0~100，P 300~1200；超范围**不发送** |
+| 失败重试 | 网络/5xx：最多 3 次指数退避；**401/403/400 不重试**（避免无意义重发） |
+
+## 7. 串口日志要点
+
+| 日志 | 含义 |
+| --- | --- |
+| `Wi-Fi 已连接，IP=...` | STA 就绪 |
+| `SNTP 时间已同步` | 将发送 `measured_at` |
+| `SHT40/BMP280 初始化成功` | 传感器在位 |
+| `上报 HTTP 201` + `ok: true` | 已写入 D1 |
+| `Token 无效或已吊销` | Dash 重新生成 Token 并改配置重烧 |
+| `THP_API_BASE` | 检查是否可达（本地 dev 须用局域网 IP） |
+
+## 8. 与参考工程的关系
+
+| 项 | `esp32c3_sensors` | 本目录 `ESP32/` |
+| --- | --- | --- |
+| 框架 | ESP-IDF v6.x | 相同 |
+| 驱动 | 自研 sht40/bmp280 + IMU/OLED | 仅 sht40/bmp280（THP 口径） |
+| 网络 | 无 | Wi-Fi STA + SNTP + HTTPS Client |
+| 输出 | OLED 多传感器页 | 云端 `POST /api/v1/readings` |
+| 采样 | 50ms 环境 / 200Hz IMU | 5 分钟上报一帧（采样后立即 POST） |
+
+## 9. 已知限制
+
+1. I2C 走线建议短、外接 4.7kΩ 上拉；GPIO8 板载 LED 可能干扰 SDA。  
+2. 未做离线本地缓存队列：断网期间的数据不会补传（v1 与需求一致，服务端不依赖设备队列）。  
+3. TLS 使用系统证书捆绑包校验公网 HTTPS；本地 `http://IP:8787` 无需证书。  
+4. Token 更换后必须重新编译烧录（未做运行时配网/OTA）。
