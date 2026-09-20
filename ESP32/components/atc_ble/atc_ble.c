@@ -46,6 +46,8 @@ static bool s_inited;
 static bool s_synced;
 static uint8_t s_own_addr_type;
 
+static void start_scan_locked(void);
+
 /* ---------------- helpers ---------------- */
 
 bool atc_ble_parse_mac_str(const char *s, uint8_t out[6])
@@ -344,8 +346,12 @@ static int gap_on_event(struct ble_gap_event *event, void *arg)
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGI(TAG, "扫描结束 reason=%d", event->disc_complete.reason);
+        ESP_LOGD(TAG, "扫描结束 reason=%d，自动续扫", event->disc_complete.reason);
         s_scanning = false;
+        /* 主动 cancel（HTTP 暂停）时不自动续扫，由调用方 start */
+        if (event->disc_complete.reason != BLE_HS_EALREADY) {
+            start_scan_locked();
+        }
         return 0;
     default:
         return 0;
@@ -357,19 +363,24 @@ static void start_scan_locked(void)
     if (!s_synced) {
         return;
     }
+    if (s_scanning) {
+        return;
+    }
     struct ble_gap_disc_params p;
     memset(&p, 0, sizeof(p));
     p.passive = 1;
+    /* 持续扫描：payload 变化仍会上报；去重仅滤完全相同广播 */
     p.filter_duplicates = 1;
     p.itvl = 0;
     p.window = 0;
     p.filter_policy = 0;
     p.limited = 0;
 
-    int rc = ble_gap_disc(s_own_addr_type, 30000 /* ms */, &p, gap_on_event, NULL);
+    /* BLE_HS_FOREVER：一直扫，直到 stop 或 disc_complete 后由回调续扫 */
+    int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_on_event, NULL);
     if (rc == 0) {
         s_scanning = true;
-        ESP_LOGI(TAG, "ATC BLE 扫描开始");
+        ESP_LOGI(TAG, "ATC BLE 持续扫描开始");
     } else if (rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "ble_gap_disc rc=%d", rc);
     }
@@ -468,7 +479,7 @@ esp_err_t atc_ble_stop_scan(void)
     if (s_scanning) {
         ble_gap_disc_cancel();
         s_scanning = false;
-        ESP_LOGI(TAG, "ATC BLE 扫描停止");
+        ESP_LOGI(TAG, "ATC BLE 扫描停止（HTTP/调试）");
     }
     return ESP_OK;
 }

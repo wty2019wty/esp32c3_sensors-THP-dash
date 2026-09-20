@@ -1028,40 +1028,41 @@ static void offline_queue_flush(void)
 /* ---------------- 主流程 ---------------- */
 
 #if THP_MI_ENABLE
-/** 短窗扫描直到拿到未过期 MI 样本，或超时 */
-static bool mi_fetch_sample(atc_ble_sample_t *out)
+/** 本周期起点：只采用 ts >= 该值 的样本（上次 MI 上报尝试之后） */
+static int64_t s_mi_period_start_ms;
+
+/**
+ * @brief 持续扫描模式：取「本周期内最近一帧」
+ *        周期 = 上次 MI 上报尝试 → 本次上报时刻。
+ *        本周期无新帧则不复用上周期缓存，避免拿旧值充数。
+ */
+static bool mi_pick_period_sample(atc_ble_sample_t *out)
 {
     if (!s_mi_ready) {
         return false;
     }
+    atc_ble_sample_t s;
+    if (!atc_ble_pop_latest(&s) || !s.valid) {
+        return false;
+    }
+    if (!th_in_range(s.temperature, s.humidity)) {
+        return false;
+    }
     const int64_t now_ms = esp_timer_get_time() / 1000;
-    if (atc_ble_pop_latest(out) &&
-        (now_ms - out->ts_ms) <= THP_MI_MAX_AGE_MS &&
-        th_in_range(out->temperature, out->humidity)) {
-        return true;
+    /* 太旧（超过配置上限）也不用 */
+    if ((now_ms - s.ts_ms) > THP_MI_MAX_AGE_MS) {
+        ESP_LOGW(TAG, "MI 缓存过期 age=%lldms，本周期跳过",
+                 (long long)(now_ms - s.ts_ms));
+        return false;
     }
-
-    ESP_LOGI(TAG, "ATC 扫描开始 window=%dms", THP_MI_SCAN_BEFORE_REPORT_MS);
-    (void)atc_ble_start_scan();
-    const int64_t deadline = now_ms + THP_MI_SCAN_BEFORE_REPORT_MS;
-    while ((esp_timer_get_time() / 1000) < deadline) {
-        if (atc_ble_pop_latest(out) &&
-            th_in_range(out->temperature, out->humidity)) {
-            (void)atc_ble_stop_scan();
-            return true;
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
+    /* 本周期：上次上报之后收到的最近一帧 */
+    if (s.ts_ms < s_mi_period_start_ms) {
+        ESP_LOGW(TAG, "MI 本周期无新帧（最近 age=%lldms < 周期起点），跳过",
+                 (long long)(now_ms - s.ts_ms));
+        return false;
     }
-    (void)atc_ble_stop_scan();
-
-    if (atc_ble_pop_latest(out)) {
-        const int64_t age = (esp_timer_get_time() / 1000) - out->ts_ms;
-        ESP_LOGW(TAG, "ATC 扫描超时/样本过期 age=%lldms t=%.2f h=%.2f",
-                 (long long)age, (double)out->temperature, (double)out->humidity);
-    } else {
-        ESP_LOGW(TAG, "ATC 扫描超时，无匹配 MAC/广播");
-    }
-    return false;
+    *out = s;
+    return true;
 }
 
 static void report_mi_if_ready(void)
@@ -1069,14 +1070,26 @@ static void report_mi_if_ready(void)
     if (!s_mi_ready) {
         return;
     }
+    /* 持续扫描应在跑；若被 stop 过则再拉起 */
+    if (!atc_ble_is_scanning()) {
+        (void)atc_ble_start_scan();
+    }
+
     unsigned heap = (unsigned)esp_get_free_heap_size();
     if (heap < 80000) {
         ESP_LOGW(TAG, "heap_free=%u < 80KB，本周期跳过 MI 上报", heap);
+        /* 仍推进周期起点，避免积压逻辑错乱 */
+        s_mi_period_start_ms = esp_timer_get_time() / 1000;
         return;
     }
 
     atc_ble_sample_t mi;
-    if (!mi_fetch_sample(&mi)) {
+    /* HTTP 期间暂停扫描，降低 TLS 峰值内存；报完立刻恢复 */
+    (void)atc_ble_stop_scan();
+
+    if (!mi_pick_period_sample(&mi)) {
+        (void)atc_ble_start_scan();
+        s_mi_period_start_ms = esp_timer_get_time() / 1000;
         return;
     }
 
@@ -1090,16 +1103,21 @@ static void report_mi_if_ready(void)
     reading.has_p = false;
     reading.rssi = (int)mi.rssi;
 
-    ESP_LOGI(TAG, "MI 采样 T=%.2f°C H=%.2f%% rssi=%d batt=%u iso=%s",
+    ESP_LOGI(TAG, "MI 本周期样本 T=%.2f°C H=%.2f%% rssi=%d batt=%u age=%lldms iso=%s",
              (double)mi.temperature, (double)mi.humidity,
              (int)mi.rssi,
              mi.battery_pct == 0xFF ? 0 : mi.battery_pct,
+             (long long)((esp_timer_get_time() / 1000) - mi.ts_ms),
              reading.has_iso ? reading.iso : "(no-ts)");
 
     thp_http_result_t res = report_with_retry(&reading, false, THP_REPORT_MAX_RETRIES);
     if (res == THP_HTTP_TRANSIENT) {
         offline_queue_push(&reading);
     }
+
+    /* 本周期处理完毕：下一周期从此刻之后收新帧 */
+    s_mi_period_start_ms = esp_timer_get_time() / 1000;
+    (void)atc_ble_start_scan();
 }
 #endif /* THP_MI_ENABLE */
 
@@ -1186,7 +1204,8 @@ void app_main(void)
             esp_err_t mi_err = atc_ble_init(mac, key_ok ? key : NULL);
             if (mi_err == ESP_OK) {
                 s_mi_ready = true;
-                ESP_LOGI(TAG, "MI BLE 网关就绪 mac=%s enc_key=%d", THP_MI_MAC, (int)key_ok);
+                s_mi_period_start_ms = 0; /* 首周期接受任意已缓存/新扫到的帧 */
+                ESP_LOGI(TAG, "MI BLE 网关就绪（持续扫描） mac=%s enc_key=%d", THP_MI_MAC, (int)key_ok);
             } else {
                 ESP_LOGE(TAG, "atc_ble_init 失败: %s", esp_err_to_name(mi_err));
             }
