@@ -1,7 +1,7 @@
 # ESP32-C3 固件：THP HTTPS 上报
 
 设备端采样并上报到本仓库云端 Worker（`POST /api/v1/readings`）。  
-硬件与量测口径遵循根目录 [REQUIREMENTS.md](../REQUIREMENTS.md) §4 / §10；驱动风格与参考工程 `G:\esp32s3\esp32c3_sensors` 对齐（ESP-IDF，新版 `i2c_master`）。
+ESP-IDF，新版 `i2c_master`
 
 ## 1. 硬件
 
@@ -62,7 +62,7 @@ copy main\thp_config.h.example main\thp_config.h
 | `THP_NTP_SERVER_LIST` | 多 NTP 源；**每次上报前** `esp_netif_sntp_start()` 重启查询并等待同步（默认阿里云 / cn.pool / 国家授时中心 / pool） |
 | `THP_NTP_SYNC_TIMEOUT_MS` | 单次上报前校时超时，默认 20000ms；失败但已有可信时间则沿用 |
 
-> 安全：`thp_config.h` 已被 `.gitignore` 忽略；**不要**把 Token 提交进仓库（REQUIREMENTS.md §12.7）。
+
 
 ## 4. 构建与烧录（ESP-IDF）
 

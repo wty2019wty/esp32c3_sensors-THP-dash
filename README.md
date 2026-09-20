@@ -1,7 +1,7 @@
 # THP Dash（Cloudflare 服务端 + Dash）
 
 ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash + 设备端固件**。  
-需求基线见 [REQUIREMENTS.md](./REQUIREMENTS.md)。  
+
 云端服务与 Web Dash 见本目录；**ESP32-C3 上报固件**见 [ESP32/](./ESP32/)。
 
 ## 架构
@@ -303,17 +303,6 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 | 想重置本地数据 | — | 停止 `wrangler dev` → 删除 `.wrangler/` → `npm run db:local` → 重新引导 admin |
 | 线上 deploy 报 D1 id 无效 | 仍是占位符 | `wrangler d1 create thp-dash` 后把真实 id 写入 `wrangler.jsonc`，再 `db:remote` |
 
-### 本地调试检查清单
-
-- [ ] `npm run db:local` 成功  
-- [ ] `npm run dev` 显示 Ready  
-- [ ] `/api/health` 返回 `ok: true`  
-- [ ] `/api/auth/bootstrap` 返回 JSON（而不是 500）  
-- [ ] 浏览器可创建 admin 并登录  
-- [ ] 能新建设备、生成 Token  
-- [ ] 用 Token `POST /api/v1/readings` 返回 201  
-- [ ] Dash 出现当前值与曲线  
-- [ ] CSV 导出文件含表头 `timestamp,temperature,humidity,pressure`  
 
 ---
 
@@ -359,7 +348,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 固件工程在 [`ESP32/`](./ESP32/)，说明见 [ESP32/README.md](./ESP32/README.md)。
 
-- 框架：ESP-IDF（与 `G:\esp32s3\esp32c3_sensors` 同风格，自研 `sht40` / `bmp280` 驱动）
+- 框架：ESP-IDF（sht40 bmp280）
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
 - 节奏：默认 5 分钟 HTTPS `POST /api/v1/readings` + Bearer Token
 - 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**；仓库仅 `.example`）
@@ -368,7 +357,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - 本机构建：`ESP32/build/esp32c3_thp_report.bin` 与 `esp32c3_thp_report_flashed.bin` 已生成（2026-09）
 - 前置：Dash 新建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP；上生产须改为线上 Worker 域名并重新烧录
 
-更细的硬件、烧录与协议说明见 `ESP32/README.md`；需求条文见 `REQUIREMENTS.md` §4 / §10；交付状态见同文件 §17。
+更细的硬件、烧录与协议说明见 `ESP32/README.md`
 
 ## 许可证
 
