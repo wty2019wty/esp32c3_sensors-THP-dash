@@ -85,3 +85,35 @@
 
 /* 设为 1 时跳过 HTTPS 证书校验（仅本地 http 调试或自签证书排查用） */
 #define THP_HTTP_SKIP_VERIFY    0
+
+/* ---------------- 小米温湿度计 2（pvvx ATC · BLE 网关） ----------------
+ * 同板 ESP32-C3：I2C 本机传感器用 Token A；小米计 BLE 解出后用 Token B。
+ * 云端零改动：Dash 里另建设备并生成 Token。
+ */
+#ifndef THP_MI_ENABLE
+#define THP_MI_ENABLE 1
+#endif
+
+/* Dash 为小米计生成的上报 Token（与 THP_DEVICE_TOKEN 分开） */
+#define THP_MI_DEVICE_TOKEN  "thp_replace_me_mi"
+
+/* 可选：须与 Token B 绑定设备一致；留空则不发送 device_id */
+#define THP_MI_DEVICE_ID     ""
+
+/* 目标 MAC（显示序）。界面「Device MAC [+ 2 Rand]」常显示 8 字节，
+ * 取前 6 字节填入；若串口 ATC 帧日志 MAC 不同，以日志为准。
+ * 示例：A4:C1:38:E2:4E:43
+ */
+#define THP_MI_MAC           "A4:C1:38:E2:4E:43"
+
+/* pvvx 配置页「BindKey」（32 hex，16 字节）——加密 beacon 使用。
+ * 注意：是 BindKey，不是 Mi Bind Key（v4.4+ 仅 EEP BindKey 生效）。
+ * Encrypted beacon 关闭时可留全 0；开启后必须填写。
+ */
+#define THP_MI_BINDKEY       "00000000000000000000000000000000"
+
+/* 上报前主动扫描窗口（毫秒）；缓存未过期时跳过扫描 */
+#define THP_MI_SCAN_BEFORE_REPORT_MS   8000
+
+/* 缓存最大年龄：超过则本周期不报 MI（建议 ≥2× 上报周期） */
+#define THP_MI_MAX_AGE_MS              (3 * THP_REPORT_PERIOD_MS)

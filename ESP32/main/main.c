@@ -43,8 +43,60 @@
 #include "sht40.h"
 #include "thp_config.h"
 #include "thp_tls_trust.h"
+#include "atc_ble.h"
+
+#ifndef THP_MI_ENABLE
+#define THP_MI_ENABLE 0
+#endif
+#ifndef THP_MI_DEVICE_TOKEN
+#define THP_MI_DEVICE_TOKEN "thp_replace_me_mi"
+#endif
+#ifndef THP_MI_DEVICE_ID
+#define THP_MI_DEVICE_ID ""
+#endif
+#ifndef THP_MI_MAC
+#define THP_MI_MAC ""
+#endif
+#ifndef THP_MI_BINDKEY
+#define THP_MI_BINDKEY ""
+#endif
+#ifndef THP_MI_SCAN_BEFORE_REPORT_MS
+#define THP_MI_SCAN_BEFORE_REPORT_MS 8000
+#endif
+#ifndef THP_MI_MAX_AGE_MS
+#define THP_MI_MAX_AGE_MS (3 * 5 * 60 * 1000)
+#endif
 
 static const char *TAG = "thp";
+
+typedef enum {
+    THP_KIND_LOCAL = 0,
+    THP_KIND_MI    = 1,
+} thp_device_kind_t;
+
+static bool s_mi_ready; /* Token + MAC 配置齐全且 BLE 已 init */
+
+static const char *token_for_kind(thp_device_kind_t k)
+{
+    return (k == THP_KIND_MI) ? THP_MI_DEVICE_TOKEN : THP_DEVICE_TOKEN;
+}
+
+static const char *device_id_for_kind(thp_device_kind_t k)
+{
+    return (k == THP_KIND_MI) ? THP_MI_DEVICE_ID : THP_DEVICE_ID;
+}
+
+static const char *kind_tag(thp_device_kind_t k)
+{
+    return (k == THP_KIND_MI) ? "MI" : "LOCAL";
+}
+
+static bool mi_token_ok(void)
+{
+    return THP_MI_DEVICE_TOKEN[0] != '\0' &&
+           strcmp(THP_MI_DEVICE_TOKEN, "thp_replace_me_mi") != 0 &&
+           strlen(THP_MI_DEVICE_TOKEN) >= 8;
+}
 
 /* ---------------- Wi-Fi / SNTP ---------------- */
 #define WIFI_CONNECTED_BIT  BIT0
@@ -404,6 +456,7 @@ typedef struct {
 
 /** 一帧待上报/待补传读数；iso 为采样时刻 UTC（补传时写入 ts） */
 typedef struct {
+    thp_device_kind_t kind;
     float temperature;
     float humidity;
     float pressure;
@@ -535,7 +588,8 @@ static void offline_queue_push(const thp_reading_t *r)
     size_t idx = (s_offline_head + s_offline_count) % THP_OFFLINE_QUEUE_LEN;
     s_offline_q[idx] = *r;
     s_offline_count++;
-    ESP_LOGW(TAG, "已入离线队列 (%u/%u) iso=%s%s%s",
+    ESP_LOGW(TAG, "已入离线队列 kind=%s (%u/%u) iso=%s%s%s",
+             kind_tag(r->kind),
              (unsigned)s_offline_count, (unsigned)THP_OFFLINE_QUEUE_LEN,
              r->has_iso ? r->iso : "(no-ts)",
              r->has_th ? " TH" : "",
@@ -704,8 +758,11 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
     bool metrics_ok = true;
 
     device_part[0] = '\0';
-    if (THP_DEVICE_ID[0] != '\0') {
-        snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", THP_DEVICE_ID);
+    {
+        const char *did = device_id_for_kind(r->kind);
+        if (did[0] != '\0') {
+            snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", did);
+        }
     }
 
     measured_part[0] = '\0';
@@ -785,7 +842,8 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     snprintf(url, sizeof(url), "%.*s/api/v1/readings", (int)base_len, base);
 
     build_json(r, backfill, body, sizeof(body));
-    snprintf(auth, sizeof(auth), "Bearer %s", THP_DEVICE_TOKEN);
+    const char *token = token_for_kind(r->kind);
+    snprintf(auth, sizeof(auth), "Bearer %s", token);
 
     esp_http_client_config_t cfg = {
         .url = url,
@@ -809,8 +867,9 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     cfg.cert_pem = NULL;
 #endif
 
-    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d",
-             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS, (int)backfill);
+    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d kind=%s",
+             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS,
+             (int)backfill, kind_tag(r->kind));
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
@@ -849,8 +908,8 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     esp_http_client_cleanup(client);
 
     *out_status = status;
-    ESP_LOGI(TAG, "上报 HTTP %d  body=%s  resp=%s",
-             status, body, resp[0] ? resp : "(empty)");
+    ESP_LOGI(TAG, "上报[%s] HTTP %d  body=%s  resp=%s",
+             kind_tag(r->kind), status, body, resp[0] ? resp : "(empty)");
 
     if (content_len > HTTP_RECV_BUF - 1) {
         ESP_LOGW(TAG, "响应体超长已截断 (Content-Length=%d)", content_len);
@@ -880,11 +939,13 @@ static thp_http_result_t report_with_retry(const thp_reading_t *r, bool backfill
             return THP_HTTP_OK;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "Token 无效或已吊销 (HTTP %d)，请在 Dash 重新生成", status);
+            ESP_LOGE(TAG, "上报[%s] Token 无效或已吊销 (HTTP %d)，请在 Dash 重新生成",
+                     kind_tag(r->kind), status);
             return THP_HTTP_AUTH_FAIL;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
-            ESP_LOGE(TAG, "服务端拒绝载荷 (HTTP %d)，本周期不重试", status);
+            ESP_LOGE(TAG, "服务端拒绝载荷[%s] (HTTP %d)，本周期不重试",
+                     kind_tag(r->kind), status);
             return THP_HTTP_BAD_PAYLOAD;
         }
 
@@ -934,7 +995,8 @@ static void offline_queue_flush(void)
 
         thp_http_result_t res = report_with_retry(item, true, 0);
         if (res == THP_HTTP_OK) {
-            ESP_LOGI(TAG, "补传成功 iso=%s", item->has_iso ? item->iso : "(no-ts)");
+            ESP_LOGI(TAG, "补传成功 kind=%s iso=%s",
+                     kind_tag(item->kind), item->has_iso ? item->iso : "(no-ts)");
             offline_queue_pop();
             sent_this_cycle++;
             if (s_offline_count > 0 && sent_this_cycle < THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
@@ -943,13 +1005,14 @@ static void offline_queue_flush(void)
             continue;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "补传遇 Token 失效，清空离线队列 %u 条（重烧配置前无意义）",
-                     (unsigned)s_offline_count);
+            ESP_LOGE(TAG, "补传遇 Token 失效 kind=%s，清空离线队列 %u 条（重烧配置前无意义）",
+                     kind_tag(item->kind), (unsigned)s_offline_count);
             offline_queue_clear();
             return;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
-            ESP_LOGW(TAG, "补传条被服务端拒绝，丢弃 iso=%s",
+            ESP_LOGW(TAG, "补传条被服务端拒绝 kind=%s，丢弃 iso=%s",
+                     kind_tag(item->kind),
                      item->has_iso ? item->iso : "(no-ts)");
             offline_queue_pop();
             continue;
@@ -963,6 +1026,82 @@ static void offline_queue_flush(void)
 }
 
 /* ---------------- 主流程 ---------------- */
+
+#if THP_MI_ENABLE
+/** 短窗扫描直到拿到未过期 MI 样本，或超时 */
+static bool mi_fetch_sample(atc_ble_sample_t *out)
+{
+    if (!s_mi_ready) {
+        return false;
+    }
+    const int64_t now_ms = esp_timer_get_time() / 1000;
+    if (atc_ble_pop_latest(out) &&
+        (now_ms - out->ts_ms) <= THP_MI_MAX_AGE_MS &&
+        th_in_range(out->temperature, out->humidity)) {
+        return true;
+    }
+
+    ESP_LOGI(TAG, "ATC 扫描开始 window=%dms", THP_MI_SCAN_BEFORE_REPORT_MS);
+    (void)atc_ble_start_scan();
+    const int64_t deadline = now_ms + THP_MI_SCAN_BEFORE_REPORT_MS;
+    while ((esp_timer_get_time() / 1000) < deadline) {
+        if (atc_ble_pop_latest(out) &&
+            th_in_range(out->temperature, out->humidity)) {
+            (void)atc_ble_stop_scan();
+            return true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    (void)atc_ble_stop_scan();
+
+    if (atc_ble_pop_latest(out)) {
+        const int64_t age = (esp_timer_get_time() / 1000) - out->ts_ms;
+        ESP_LOGW(TAG, "ATC 扫描超时/样本过期 age=%lldms t=%.2f h=%.2f",
+                 (long long)age, (double)out->temperature, (double)out->humidity);
+    } else {
+        ESP_LOGW(TAG, "ATC 扫描超时，无匹配 MAC/广播");
+    }
+    return false;
+}
+
+static void report_mi_if_ready(void)
+{
+    if (!s_mi_ready) {
+        return;
+    }
+    unsigned heap = (unsigned)esp_get_free_heap_size();
+    if (heap < 80000) {
+        ESP_LOGW(TAG, "heap_free=%u < 80KB，本周期跳过 MI 上报", heap);
+        return;
+    }
+
+    atc_ble_sample_t mi;
+    if (!mi_fetch_sample(&mi)) {
+        return;
+    }
+
+    thp_reading_t reading;
+    reading_stamp_now(&reading);
+    reading.kind = THP_KIND_MI;
+    reading.temperature = mi.temperature;
+    reading.humidity = mi.humidity;
+    reading.pressure = 0;
+    reading.has_th = true;
+    reading.has_p = false;
+    reading.rssi = (int)mi.rssi;
+
+    ESP_LOGI(TAG, "MI 采样 T=%.2f°C H=%.2f%% rssi=%d batt=%u iso=%s",
+             (double)mi.temperature, (double)mi.humidity,
+             (int)mi.rssi,
+             mi.battery_pct == 0xFF ? 0 : mi.battery_pct,
+             reading.has_iso ? reading.iso : "(no-ts)");
+
+    thp_http_result_t res = report_with_retry(&reading, false, THP_REPORT_MAX_RETRIES);
+    if (res == THP_HTTP_TRANSIENT) {
+        offline_queue_push(&reading);
+    }
+}
+#endif /* THP_MI_ENABLE */
 
 static void thp_report_task(void *arg)
 {
@@ -982,13 +1121,14 @@ static void thp_report_task(void *arg)
         if (sample_read(&sample)) {
             /* 先打 UTC/rssi 戳（会 memset），再写入业务字段 */
             reading_stamp_now(&reading);
+            reading.kind = THP_KIND_LOCAL;
             reading.temperature = sample.temperature;
             reading.humidity = sample.humidity;
             reading.pressure = sample.pressure;
             reading.has_th = sample.has_th;
             reading.has_p = sample.has_p;
 
-            ESP_LOGI(TAG, "采样%s%s iso=%s → %s",
+            ESP_LOGI(TAG, "采样[LOCAL]%s%s iso=%s → %s",
                      sample.has_th ? " T/H" : "",
                      sample.has_p ? " P" : "",
                      reading.has_iso ? reading.iso : "(no-ts)", THP_API_BASE);
@@ -1005,8 +1145,13 @@ static void thp_report_task(void *arg)
                 offline_queue_push(&reading);
             }
         } else {
-            ESP_LOGW(TAG, "本周期无有效采样，跳过上报");
+            ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL 上报");
         }
+
+#if THP_MI_ENABLE
+        /* HTTP/TLS 期间停扫描；MI 在本机上报之后处理 */
+        report_mi_if_ready();
+#endif
 
         vTaskDelay(pdMS_TO_TICKS(THP_REPORT_PERIOD_MS));
     }
@@ -1021,6 +1166,35 @@ void app_main(void)
         strlen(THP_DEVICE_TOKEN) < 8) {
         ESP_LOGE(TAG, "请先配置 thp_config.h 中的 THP_DEVICE_TOKEN（Dash 生成，明文只显示一次）");
     }
+
+#if THP_MI_ENABLE
+    if (!mi_token_ok()) {
+        ESP_LOGW(TAG, "MI Token 未配置（THP_MI_DEVICE_TOKEN），跳过小米计上报");
+    } else {
+        uint8_t mac[6];
+        uint8_t key[16];
+        bool mac_ok = atc_ble_parse_mac_str(THP_MI_MAC, mac);
+        if (!mac_ok) {
+            ESP_LOGW(TAG, "THP_MI_MAC 非法: '%s'（示例 A4:C1:38:E2:4E:43）", THP_MI_MAC);
+        }
+        bool key_ok = atc_ble_parse_key_hex(THP_MI_BINDKEY, key);
+        if (!key_ok) {
+            memset(key, 0, sizeof(key));
+            ESP_LOGW(TAG, "THP_MI_BINDKEY 非法或未填；明文 Custom 可工作，加密 beacon 需要 BindKey");
+        }
+        if (mac_ok) {
+            esp_err_t mi_err = atc_ble_init(mac, key_ok ? key : NULL);
+            if (mi_err == ESP_OK) {
+                s_mi_ready = true;
+                ESP_LOGI(TAG, "MI BLE 网关就绪 mac=%s enc_key=%d", THP_MI_MAC, (int)key_ok);
+            } else {
+                ESP_LOGE(TAG, "atc_ble_init 失败: %s", esp_err_to_name(mi_err));
+            }
+        }
+    }
+#else
+    ESP_LOGI(TAG, "THP_MI_ENABLE=0，未编译小米计 BLE 网关");
+#endif
 
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
