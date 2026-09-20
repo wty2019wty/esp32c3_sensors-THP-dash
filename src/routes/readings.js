@@ -19,6 +19,7 @@ import {
   sqlBucketStartExpr,
   SAFE_RAW_LOAD_ROWS,
 } from '../lib/downsample.js';
+import { validateReadingPayload } from '../lib/reading_payload.js';
 
 function resolveDisplayTz(env) {
   return env.TZ_DISPLAY || env.DISPLAY_TZ || 'Asia/Shanghai';
@@ -39,58 +40,6 @@ async function resolveDeviceFromToken(env, plain) {
   if (row.revoked_at) return null;
   if (row.status !== 'active') return null;
   return row;
-}
-
-/**
- * 读数字段可部分上报：仅温湿度（SHT40）或仅气压（BMP280）。
- * 缺省字段必须为 undefined/null（不可用 NaN 或空串占位）。
- */
-function parseOptionalMetric(body, key, min, max) {
-  if (body == null || body[key] === undefined || body[key] === null) {
-    return { present: false, value: null };
-  }
-  const n = Number(body[key]);
-  if (!Number.isFinite(n) || n < min || n > max) {
-    return { error: `${key} 不合法` };
-  }
-  return { present: true, value: round3(n) };
-}
-
-function validateReadingPayload(body) {
-  const t = parseOptionalMetric(body, 'temperature', -40, 85);
-  if (t.error) return { error: t.error };
-  const h = parseOptionalMetric(body, 'humidity', 0, 100);
-  if (h.error) return { error: h.error };
-  const p = parseOptionalMetric(body, 'pressure', 300, 1200);
-  if (p.error) return { error: p.error };
-
-  /* T/H 同源 SHT40，不允许只报其中一个 */
-  if (t.present !== h.present) {
-    return { error: 'temperature 与 humidity 必须同时上报（均来自 SHT40）' };
-  }
-  if (!t.present && !p.present) {
-    return { error: '至少上报 temperature/humidity 或 pressure' };
-  }
-
-  let measuredAt = null;
-  if (body?.measured_at) {
-    if (!isValidIso(body.measured_at)) return { error: 'measured_at 必须是 ISO-8601 时间' };
-    measuredAt = normalizeIso(body.measured_at);
-  }
-  let rssi = null;
-  if (body?.rssi != null) {
-    const r = Number(body.rssi);
-    if (Number.isFinite(r)) rssi = Math.trunc(r);
-  }
-  return {
-    values: {
-      temperature: t.present ? t.value : null,
-      humidity: h.present ? h.value : null,
-      pressure: p.present ? p.value : null,
-      measuredAt,
-      rssi,
-    },
-  };
 }
 
 /** Device API: POST /api/v1/readings — Bearer device token only */

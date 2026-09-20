@@ -10,6 +10,7 @@
  * 需求对齐：REQUIREMENTS.md §4 / §10 / §12
  * 参考驱动：G:\esp32s3\esp32c3_sensors（ESP-IDF 新版 i2c_master）
  */
+#include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -63,6 +64,9 @@ static const char *TAG = "thp";
 #endif
 #ifndef THP_OFFLINE_FLUSH_GAP_MS
 #define THP_OFFLINE_FLUSH_GAP_MS 200
+#endif
+#ifndef THP_OFFLINE_FLUSH_MAX_PER_CYCLE
+#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE 24
 #endif
 
 static EventGroupHandle_t s_wifi_events;
@@ -659,6 +663,31 @@ static void probe_api_endpoint(void)
 }
 
 /**
+ * @brief 安全追加 JSON 片段；缓冲不足或编码失败时截断并返回 false
+ */
+static bool json_append(char *buf, size_t cap, size_t *used, const char *fmt, ...)
+{
+    if (buf == NULL || used == NULL || cap == 0 || *used >= cap) {
+        return false;
+    }
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(buf + *used, cap - *used, fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        buf[*used] = '\0';
+        return false;
+    }
+    if ((size_t)n >= cap - *used) {
+        /* C99 snprintf 返回“需要的长度”，不可直接累加 used */
+        *used = cap - 1;
+        return false;
+    }
+    *used += (size_t)n;
+    return true;
+}
+
+/**
  * @brief 组装 readings JSON
  * @param backfill true：用 r->iso 作为历史 ts + measured_at（云端按 ts 落点）
  *                 false：实时上报，不发 ts（入库时间以服务端为准）
@@ -672,6 +701,7 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
     char metrics[96];
     int rssi = r->rssi;
     size_t used = 0;
+    bool metrics_ok = true;
 
     device_part[0] = '\0';
     if (THP_DEVICE_ID[0] != '\0') {
@@ -684,16 +714,22 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
 
     /* 部分字段：缺省传感器对应字段整体省略，不发 0/null 占位 */
     if (r->has_th) {
-        used += (size_t)snprintf(metrics + used, sizeof(metrics) - used,
+        metrics_ok = json_append(metrics, sizeof(metrics), &used,
                                  "\"temperature\":%.2f,\"humidity\":%.2f",
                                  (double)r->temperature, (double)r->humidity);
     }
     if (r->has_p) {
-        if (used > 0 && used < sizeof(metrics) - 1) {
-            used += (size_t)snprintf(metrics + used, sizeof(metrics) - used, ",");
+        if (metrics_ok && used > 0) {
+            metrics_ok = json_append(metrics, sizeof(metrics), &used, ",");
         }
-        used += (size_t)snprintf(metrics + used, sizeof(metrics) - used,
-                                 "\"pressure\":%.2f", (double)r->pressure);
+        if (metrics_ok) {
+            metrics_ok = json_append(metrics, sizeof(metrics), &used,
+                                     "\"pressure\":%.2f", (double)r->pressure);
+        }
+    }
+    if (!metrics_ok && metrics[0] == '\0') {
+        /* 无法组装业务字段：调用方应避免发送空 metrics（服务端会 400） */
+        ESP_LOGE(TAG, "build_json metrics 缓冲不足，丢弃本帧");
     }
 
     if (backfill) {
@@ -793,8 +829,10 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
         ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x)  heap=%u  body=%s",
                  esp_err_to_name(err), (unsigned)err,
                  (unsigned)esp_get_free_heap_size(), body);
-        /* 紧接着做一次 TCP 预检，方便区分 DNS / 路由 / TLS */
-        probe_api_endpoint();
+        /* 实时上报失败时做 TCP 预检；补传路径避免每条都刷预检日志 */
+        if (!backfill) {
+            probe_api_endpoint();
+        }
         esp_http_client_cleanup(client);
         *out_status = -1;
         return THP_HTTP_TRANSIENT;
@@ -867,6 +905,7 @@ static thp_http_result_t report_with_retry(const thp_reading_t *r, bool backfill
 
 /**
  * @brief 网络恢复后按时间顺序补传队列（body 带历史 ts）
+ *        每周期最多补 THP_OFFLINE_FLUSH_MAX_PER_CYCLE 条，避免长时间占住实时采样
  */
 static void offline_queue_flush(void)
 {
@@ -874,9 +913,16 @@ static void offline_queue_flush(void)
         return;
     }
 
-    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条", (unsigned)s_offline_count);
+    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d）",
+             (unsigned)s_offline_count, THP_OFFLINE_FLUSH_MAX_PER_CYCLE);
 
+    int sent_this_cycle = 0;
     while (s_offline_count > 0) {
+        if (sent_this_cycle >= THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
+            ESP_LOGW(TAG, "本周期补传已达上限 %d，剩余 %u 条下轮继续",
+                     THP_OFFLINE_FLUSH_MAX_PER_CYCLE, (unsigned)s_offline_count);
+            return;
+        }
         if (!wifi_is_connected()) {
             ESP_LOGW(TAG, "补传中断：Wi-Fi 断开，剩余 %u 条", (unsigned)s_offline_count);
             return;
@@ -890,7 +936,8 @@ static void offline_queue_flush(void)
         if (res == THP_HTTP_OK) {
             ESP_LOGI(TAG, "补传成功 iso=%s", item->has_iso ? item->iso : "(no-ts)");
             offline_queue_pop();
-            if (s_offline_count > 0) {
+            sent_this_cycle++;
+            if (s_offline_count > 0 && sent_this_cycle < THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
                 vTaskDelay(pdMS_TO_TICKS(THP_OFFLINE_FLUSH_GAP_MS));
             }
             continue;

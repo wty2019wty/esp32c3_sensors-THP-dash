@@ -107,6 +107,7 @@ Content-Type: application/json
 - 温湿度口径 **SHT40**，气压 **BMP280**  
 - **支持部分上报**：仅 `{temperature,humidity}` 或仅 `{pressure}`；缺省字段为 SQL `NULL`，图表/CSV 显示为空缺  
 - `temperature` 与 `humidity` 必须同时出现（同源）；至少一组有效字段  
+- 缺省字段必须 **省略** 或为 `null`；空串 / 布尔 / 数组会被拒绝（避免 `Number("")===0` 误入库）  
 - `device_id` 以 Token 绑定为准  
 
 ## API 一览
