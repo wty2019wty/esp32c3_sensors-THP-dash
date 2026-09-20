@@ -342,10 +342,10 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
         }
     }
 
-    /* C3 单射频：仅在 perform 期间停 BLE 扫描，避免与 TLS 抢空口 */
+    /* C3 单射频：仅在 perform 期间停 BLE 扫描；结束后若仍在窗口内才恢复 */
     atc_ble_stop_scan();
     esp_err_t err = esp_http_client_perform(client);
-    atc_ble_start_scan();
+    atc_ble_resume_scan_if_wanted();
 
     if (net_locked && s_net_mtx) {
         xSemaphoreGive(s_net_mtx);

@@ -121,9 +121,12 @@
  */
 #define THP_MI_BINDKEY       "00000000000000000000000000000000"
 
-/* 上报前主动扫描窗口（毫秒）；【持续扫描模式下已不再使用】
- * 固件改为后台一直扫，上报时取「本周期内最近一帧」。 */
-#define THP_MI_SCAN_BEFORE_REPORT_MS   8000
+/* BLE 窗口扫描（非持续）：
+ * 仅在周期起点 T 的前 OPEN ms 到后 CLOSE ms 开扫；
+ * 上报取窗口内距 T 最近的一帧。默认不扫描以降低空口与功耗。
+ */
+#define THP_MI_SCAN_OPEN_BEFORE_MS   5000
+#define THP_MI_SCAN_CLOSE_AFTER_MS   10000
 
-/* 样本最大年龄：超过则本周期不报 MI（建议 ≥2× 上报周期） */
+/* 样本距 T 的最大可接受距离（毫秒）；建议 ≥ 窗口总长 */
 #define THP_MI_MAX_AGE_MS              (3 * THP_REPORT_PERIOD_MS)

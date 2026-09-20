@@ -24,8 +24,18 @@ typedef struct {
 
 /** expect_mac 为显示序 6 字节；全 0 表示不按 MAC 过滤（首帧锁定） */
 esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16]);
+
+/** 窗口扫描：仅在 [ref-open, ref+close] 帧才会进入窗口环形缓存 */
+void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_after_ms);
+/** 关闭窗口并停扫（窗口外不扫描） */
+void atc_ble_window_close(void);
+/** 取窗口内 |ts-ref| 最小的一帧；无样本返回 false */
+bool atc_ble_pop_window_best(int64_t ref_ms, atc_ble_sample_t *out);
+
 esp_err_t atc_ble_start_scan(void);
 esp_err_t atc_ble_stop_scan(void);
+/** HTTP 后恢复：仅当窗口仍打开时续扫，不会造成窗口外持续扫描 */
+esp_err_t atc_ble_resume_scan_if_wanted(void);
 bool      atc_ble_pop_latest(atc_ble_sample_t *out);
 void      atc_ble_clear_cache(void);
 bool      atc_ble_is_scanning(void);

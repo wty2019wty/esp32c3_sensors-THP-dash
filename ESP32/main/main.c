@@ -3,7 +3,10 @@
  *
  * 模块：
  *   thp_wifi / thp_time / thp_sensors / thp_queue / thp_report / thp_mi
- *   thp_sched — 单任务周期流水线（校时 → 补传 → LOCAL → MI → 睡眠）
+ *   thp_sched — 单任务周期流水线
+ *               BLE 窗 T-5s~T+10s（默认不持续扫描）
+ *               校时 → LOCAL → 关窗取 MI → 补传 → 睡到下窗
+ *               deadline = period - margin，耗尽时 HTTP 跳过、读数仍入队
  *
  * 上报：HTTPS POST {THP_API_BASE}/api/v1/readings
  *   Authorization: Bearer <device_token>

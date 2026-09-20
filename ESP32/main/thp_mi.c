@@ -12,6 +12,7 @@
 #include "thp_report.h"
 #include "thp_time.h"
 #include "thp_types.h"
+#include "thp_wifi.h"
 
 static const char *TAG = "thp.mi";
 
@@ -36,46 +37,23 @@ static const char *TAG = "thp.mi";
 #ifndef THP_MI_HEAP_MIN_REPORT
 #define THP_MI_HEAP_MIN_REPORT 70000
 #endif
+#ifndef THP_MI_SCAN_OPEN_BEFORE_MS
+#define THP_MI_SCAN_OPEN_BEFORE_MS 5000
+#endif
+#ifndef THP_MI_SCAN_CLOSE_AFTER_MS
+#define THP_MI_SCAN_CLOSE_AFTER_MS 10000
+#endif
 
 #if THP_MI_ENABLE
 #include "atc_ble.h"
 
 static bool s_mi_ready;
-/** 上次 MI 上报尝试之后的起点；只采用 ts >= 该值 的样本 */
-static int64_t s_mi_period_start_ms;
 
 static bool mi_token_ok(void)
 {
     return THP_MI_DEVICE_TOKEN[0] != '\0' &&
            strcmp(THP_MI_DEVICE_TOKEN, "thp_replace_me_mi") != 0 &&
            strlen(THP_MI_DEVICE_TOKEN) >= 8;
-}
-
-static bool mi_pick_period_sample(atc_ble_sample_t *out)
-{
-    if (!s_mi_ready) {
-        return false;
-    }
-    atc_ble_sample_t s;
-    if (!atc_ble_pop_latest(&s) || !s.valid) {
-        return false;
-    }
-    if (!thp_th_in_range(s.temperature, s.humidity)) {
-        return false;
-    }
-    const int64_t now_ms = esp_timer_get_time() / 1000;
-    if ((now_ms - s.ts_ms) > THP_MI_MAX_AGE_MS) {
-        ESP_LOGW(TAG, "MI 缓存过期 age=%lldms，本周期跳过",
-                 (long long)(now_ms - s.ts_ms));
-        return false;
-    }
-    if (s.ts_ms < s_mi_period_start_ms) {
-        ESP_LOGW(TAG, "MI 本周期无新帧（最近 age=%lldms < 周期起点），跳过",
-                 (long long)(now_ms - s.ts_ms));
-        return false;
-    }
-    *out = s;
-    return true;
 }
 
 bool thp_mi_init(void)
@@ -105,8 +83,9 @@ bool thp_mi_init(void)
     }
 
     s_mi_ready = true;
-    s_mi_period_start_ms = 0; /* 首周期接受任意已缓存/新扫到的帧 */
-    ESP_LOGI(TAG, "MI BLE 网关就绪（持续扫描） mac=%s enc_key=%d", THP_MI_MAC, (int)key_ok);
+    ESP_LOGI(TAG, "MI BLE 网关就绪（窗口扫描 T-%dms~T+%dms） mac=%s enc_key=%d",
+             THP_MI_SCAN_OPEN_BEFORE_MS, THP_MI_SCAN_CLOSE_AFTER_MS,
+             THP_MI_MAC, (int)key_ok);
     return true;
 }
 
@@ -115,19 +94,47 @@ bool thp_mi_is_ready(void)
     return s_mi_ready;
 }
 
-void thp_mi_report_cycle(TickType_t deadline)
+void thp_mi_scan_window_open(int64_t cycle_ref_ms)
+{
+    if (!s_mi_ready) {
+        return;
+    }
+    atc_ble_window_open(cycle_ref_ms,
+                        THP_MI_SCAN_OPEN_BEFORE_MS,
+                        THP_MI_SCAN_CLOSE_AFTER_MS);
+}
+
+void thp_mi_scan_window_close(void)
+{
+    if (!s_mi_ready) {
+        return;
+    }
+    atc_ble_window_close();
+}
+
+void thp_mi_report_cycle(int64_t cycle_ref_ms, TickType_t deadline)
 {
     if (!s_mi_ready) {
         return;
     }
 
-    if (!atc_ble_is_scanning()) {
-        (void)atc_ble_start_scan();
+    atc_ble_sample_t mi;
+    if (!atc_ble_pop_window_best(cycle_ref_ms, &mi) || !mi.valid) {
+        ESP_LOGW(TAG, "MI 窗口内无样本（T-%dms~T+%dms），本周期跳过",
+                 THP_MI_SCAN_OPEN_BEFORE_MS, THP_MI_SCAN_CLOSE_AFTER_MS);
+        return;
+    }
+    if (!thp_th_in_range(mi.temperature, mi.humidity)) {
+        ESP_LOGW(TAG, "MI 窗口样本超范围，丢弃 T=%.2f H=%.2f",
+                 (double)mi.temperature, (double)mi.humidity);
+        return;
     }
 
-    atc_ble_sample_t mi;
-    if (!mi_pick_period_sample(&mi)) {
-        s_mi_period_start_ms = esp_timer_get_time() / 1000;
+    const int64_t dist_ms = mi.ts_ms - cycle_ref_ms;
+    const int64_t abs_dist = dist_ms < 0 ? -dist_ms : dist_ms;
+    if (abs_dist > THP_MI_MAX_AGE_MS) {
+        ESP_LOGW(TAG, "MI 样本距周期起点过远 dist=%lldms，跳过",
+                 (long long)abs_dist);
         return;
     }
 
@@ -142,29 +149,25 @@ void thp_mi_report_cycle(TickType_t deadline)
     reading.rssi = (int)mi.rssi;
 
     unsigned heap = (unsigned)esp_get_free_heap_size();
-    const int32_t remain = thp_deadline_remain_ms(deadline);
 
-    ESP_LOGI(TAG, "MI 本周期样本 T=%.2f°C H=%.2f%% rssi=%d batt=%u age=%lldms iso=%s heap=%u remain=%dms",
+    ESP_LOGI(TAG, "MI 窗口样本 T=%.2f°C H=%.2f%% rssi=%d batt=%u dist_to_T=%+lldms iso=%s heap=%u remain=%dms",
              (double)mi.temperature, (double)mi.humidity,
              (int)mi.rssi,
              mi.battery_pct == 0xFF ? 0 : mi.battery_pct,
-             (long long)((esp_timer_get_time() / 1000) - mi.ts_ms),
+             (long long)dist_ms,
              reading.has_iso ? reading.iso : "(no-ts)",
-             heap, (int)remain);
+             heap, (int)thp_deadline_remain_ms(deadline));
 
-    /* heap 不足或预算耗尽：不发 HTTP，但样本仍入队，避免丢数据 */
     if (heap < THP_MI_HEAP_MIN_REPORT || thp_deadline_reached(deadline) ||
         !thp_wifi_is_connected()) {
         if (heap < THP_MI_HEAP_MIN_REPORT) {
             ESP_LOGW(TAG, "heap_free=%u < %d，MI 读数直接入队", heap, THP_MI_HEAP_MIN_REPORT);
         }
         thp_queue_push(&reading);
-        s_mi_period_start_ms = esp_timer_get_time() / 1000;
         return;
     }
 
     thp_report_or_enqueue(&reading, deadline);
-    s_mi_period_start_ms = esp_timer_get_time() / 1000;
 }
 
 #else /* !THP_MI_ENABLE */
@@ -180,8 +183,18 @@ bool thp_mi_is_ready(void)
     return false;
 }
 
-void thp_mi_report_cycle(TickType_t deadline)
+void thp_mi_scan_window_open(int64_t cycle_ref_ms)
 {
+    (void)cycle_ref_ms;
+}
+
+void thp_mi_scan_window_close(void)
+{
+}
+
+void thp_mi_report_cycle(int64_t cycle_ref_ms, TickType_t deadline)
+{
+    (void)cycle_ref_ms;
     (void)deadline;
 }
 

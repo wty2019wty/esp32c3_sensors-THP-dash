@@ -46,8 +46,18 @@ static bool s_has_bindkey;
 static volatile bool s_scanning;
 static volatile bool s_inited;
 static volatile bool s_synced;
-static volatile bool s_scan_wanted = true; /* HTTP perform 期间短暂 false */
+static volatile bool s_scan_wanted = false; /* 仅窗口打开时 true；HTTP perform 期间短暂 false */
+static bool s_scan_announced;
 static uint8_t s_own_addr_type;
+
+/* 窗口环形缓存：收集窗口内帧，上报时取 |ts-ref| 最小 */
+#define ATC_WINDOW_RING_N 24
+static atc_ble_sample_t s_win_ring[ATC_WINDOW_RING_N];
+static volatile size_t s_win_count;
+static volatile size_t s_win_head;
+static volatile bool s_window_active;
+static volatile int64_t s_window_open_ms;
+static volatile int64_t s_window_close_ms;
 
 static int gap_on_event(struct ble_gap_event *event, void *arg);
 static void start_scan_locked(void);
@@ -119,10 +129,19 @@ static bool mac_eq(const uint8_t a[6], const uint8_t b[6])
 
 static void cache_store(const atc_ble_sample_t *s)
 {
+    const int64_t now_ms = esp_timer_get_time() / 1000;
     portENTER_CRITICAL(&s_lock);
     s_latest = *s;
     s_latest.valid = true;
-    s_latest.ts_ms = esp_timer_get_time() / 1000;
+    s_latest.ts_ms = now_ms;
+    if (s_window_active &&
+        now_ms >= s_window_open_ms && now_ms <= s_window_close_ms) {
+        s_win_ring[s_win_head] = s_latest;
+        s_win_head = (s_win_head + 1) % ATC_WINDOW_RING_N;
+        if (s_win_count < ATC_WINDOW_RING_N) {
+            s_win_count++;
+        }
+    }
     portEXIT_CRITICAL(&s_lock);
 }
 
@@ -310,7 +329,7 @@ static void handle_adv_raw(const uint8_t addr_msb[6], int8_t rssi,
                     memcpy(s.mac, addr_msb, 6);
                     s.rssi = rssi;
                     cache_store(&s);
-                    ESP_LOGI(TAG, "ATC帧 t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
+                    ESP_LOGD(TAG, "ATC帧 t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
                              (double)s.temperature, (double)s.humidity,
                              s.battery_pct == 0xFF ? 0 : s.battery_pct,
                              (int)rssi,
@@ -379,13 +398,18 @@ static void start_scan_locked(void)
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_on_event, NULL);
     if (rc == 0) {
         s_scanning = true;
-        ESP_LOGI(TAG, "ATC BLE 持续扫描开始");
+        if (!s_scan_announced) {
+            s_scan_announced = true;
+            ESP_LOGI(TAG, "ATC BLE 扫描开始（周期窗口模式）");
+        } else {
+            ESP_LOGD(TAG, "ATC BLE 扫描恢复");
+        }
     } else if (rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "ble_gap_disc rc=%d", rc);
     }
 }
 
-/** 独立任务负责启停扫描，避免在 NimBLE 回调里调 GAP API */
+/** 独立任务负责启停扫描，避免在 NimBLE 回调里调 GAP API；仅窗口内续扫 */
 static void scan_sup_task(void *arg)
 {
     (void)arg;
@@ -399,11 +423,17 @@ static void scan_sup_task(void *arg)
             beat = 0;
             atc_ble_sample_t s;
             bool ok = atc_ble_pop_latest(&s);
-            ESP_LOGI(TAG, "ATC心跳 scan=%d wanted=%d cache=%s age=%lldms heap=%u",
+            portENTER_CRITICAL(&s_lock);
+            size_t win_n = s_win_count;
+            size_t win_h = s_win_head;
+            portEXIT_CRITICAL(&s_lock);
+            ESP_LOGI(TAG, "ATC心跳 scan=%d wanted=%d window=%d win_n=%u cache=%s age=%lldms heap=%u",
                      (int)s_scanning, (int)s_scan_wanted,
+                     (int)s_window_active, (unsigned)win_n,
                      ok ? "ok" : "none",
                      ok ? (long long)((esp_timer_get_time() / 1000) - s.ts_ms) : -1LL,
                      (unsigned)esp_get_free_heap_size());
+            (void)win_h;
         }
         vTaskDelay(pdMS_TO_TICKS(2000));
     }
@@ -464,7 +494,7 @@ esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16])
         }
     }
 
-    ESP_LOGI(TAG, "ATC BLE init  mac_filter=%d bindkey=%d",
+    ESP_LOGI(TAG, "ATC BLE init  mac_filter=%d bindkey=%d（窗口扫描，默认停扫）",
              (int)s_has_mac_filter, (int)s_has_bindkey);
 
     esp_err_t err = nimble_port_init();
@@ -482,9 +512,93 @@ esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16])
     if (ok != pdPASS) {
         ESP_LOGW(TAG, "scan_sup_task 创建失败，扫描可能无法自动续启");
     }
-    s_scan_wanted = true;
+    /* 默认不扫：等周期窗口 atc_ble_window_open */
+    s_scan_wanted = false;
     s_inited = true;
     return ESP_OK;
+}
+
+void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_after_ms)
+{
+    if (!s_inited) {
+        return;
+    }
+    const int64_t open_ms = ref_ms - open_before_ms;
+    const int64_t close_ms = ref_ms + close_after_ms;
+
+    portENTER_CRITICAL(&s_lock);
+    s_win_head = 0;
+    s_win_count = 0;
+    memset((void *)s_win_ring, 0, sizeof(s_win_ring));
+    s_window_open_ms = open_ms;
+    s_window_close_ms = close_ms;
+    s_window_active = true;
+    portEXIT_CRITICAL(&s_lock);
+
+    s_scan_wanted = true;
+    ESP_LOGI(TAG, "ATC BLE 窗口开启 ref=%lld open=%lld close=%lld（前%lldms~后%lldms）",
+             (long long)ref_ms, (long long)open_ms, (long long)close_ms,
+             (long long)open_before_ms, (long long)close_after_ms);
+    if (s_synced) {
+        start_scan_locked();
+    }
+}
+
+void atc_ble_window_close(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    s_window_active = false;
+    portEXIT_CRITICAL(&s_lock);
+    s_scan_wanted = false;
+    if (s_scanning) {
+        ble_gap_disc_cancel();
+        s_scanning = false;
+        ESP_LOGD(TAG, "ATC BLE 窗口关闭，扫描暂停");
+    } else {
+        ESP_LOGD(TAG, "ATC BLE 窗口关闭");
+    }
+}
+
+bool atc_ble_pop_window_best(int64_t ref_ms, atc_ble_sample_t *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    bool found = false;
+    atc_ble_sample_t best;
+    memset(&best, 0, sizeof(best));
+    int64_t best_dist = INT64_MAX;
+
+    portENTER_CRITICAL(&s_lock);
+    size_t n = s_win_count;
+    size_t head = s_win_head;
+    /* 只取窗口时间范围内的帧，再选 |ts-ref| 最小 */
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (head + ATC_WINDOW_RING_N - 1 - i) % ATC_WINDOW_RING_N;
+        const atc_ble_sample_t *cand = &s_win_ring[idx];
+        if (!cand->valid) {
+            continue;
+        }
+        if (cand->ts_ms < s_window_open_ms || cand->ts_ms > s_window_close_ms) {
+            continue;
+        }
+        int64_t d = cand->ts_ms - ref_ms;
+        if (d < 0) {
+            d = -d;
+        }
+        if (!found || d < best_dist) {
+            best = *cand;
+            best_dist = d;
+            found = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    if (!found) {
+        return false;
+    }
+    *out = best;
+    return true;
 }
 
 esp_err_t atc_ble_start_scan(void)
@@ -509,7 +623,24 @@ esp_err_t atc_ble_stop_scan(void)
     if (s_scanning) {
         ble_gap_disc_cancel();
         s_scanning = false;
-        ESP_LOGI(TAG, "ATC BLE 扫描暂停（HTTP/调试）");
+        /* 例行停扫：HTTP perform 期间降低 C3 上 Wi-Fi/BLE 空口争用 */
+        ESP_LOGD(TAG, "ATC BLE 扫描暂停（HTTP 共存）");
+    }
+    return ESP_OK;
+}
+
+/** HTTP 后恢复：仅当本周期仍处于扫描窗口时续扫 */
+esp_err_t atc_ble_resume_scan_if_wanted(void)
+{
+    if (!s_inited) {
+        return ESP_OK;
+    }
+    if (!s_window_active) {
+        return ESP_OK;
+    }
+    s_scan_wanted = true;
+    if (s_synced) {
+        start_scan_locked();
     }
     return ESP_OK;
 }
