@@ -4,7 +4,7 @@
 |----|------|
 | 项目目录 | `G:\esp32s3\esp32c3_sensors-THP-dash` |
 | 文档性质 | 需求与方案定稿（只约定「做什么 / 约束是什么」，不含实现代码） |
-| 状态 | 已按讨论逐项收束；实现阶段以此为准 |
+| 状态 | 需求已定稿；§14–§17 已按当前实现与构建物更新（Worker/Dash/固件本地交付，线上 D1 待运维） |
 
 ---
 
@@ -451,45 +451,61 @@ Dash 默认范围：**当天**（产品时区下的本地日界 → 当前时刻
 
 ---
 
-## 14. 实现阶段待定细节（不阻塞本需求定稿）
+## 14. 实现阶段待定细节（已按实现收束）
 
-| # | 项 | 建议默认 |
+| # | 项 | 实际落地 |
 |---|----|----------|
-| 1 | 降采样阶梯具体数值 | 采用第 7.2 节 v1 表 |
-| 2 | 聚合点是否附 min/max | v1 仅 avg |
-| 3 | 用户会话有效期 | 约 1 天滑动续期 |
-| 4 | 产品展示时区 | 如 Asia/Shanghai |
-| 5 | CSV 是否带 UTF-8 BOM | 兼顾 Excel 后定 |
-| 6 | 第一个 admin 的初始化方式 | 部署引导/受控初始化 |
-| 7 | 离线阈值 | 默认约 2×上报周期 |
-| 8 | 聚合是否物化 | v1 查询时计算，性能不足再物化 |
+| 1 | 降采样阶梯具体数值 | ≤24h 原始 5 min；>24h 30 min；>7d 2 h；>30d 6 h；>90d 1 d；>1y 1 周（`src/lib/downsample.js`） |
+| 2 | 聚合点是否附 min/max | **v1 仅 avg**，未附 min/max |
+| 3 | 用户会话有效期 | **1 天滑动续期**（每次鉴权刷新 Cookie Max-Age） |
+| 4 | 产品展示时区 | **Asia/Shanghai**（可用环境变量 `TZ_DISPLAY` 覆盖） |
+| 5 | CSV 是否带 UTF-8 BOM | **带 BOM**（兼顾 Excel）；列 `timestamp,temperature,humidity,pressure`；数值约 2 位小数 |
+| 6 | 第一个 admin 的初始化方式 | **Bootstrap 页面 / `POST /api/auth/bootstrap`**（库内无用户时开放） |
+| 7 | 离线阈值 | **10 分钟**（`OFFLINE_MS = 10 * 60 * 1000`，即 2×上报周期） |
+| 8 | 聚合是否物化 | **查询时 SQL 聚合**；失败回退内存聚合；无物化表 |
+| 9 | 密码哈希算法 | **PBKDF2-SHA256（100000）**——Workers WebCrypto 上限，未用 Argon2id/bcrypt |
 
 ---
 
-## 15. 建议实现顺序（供后续开发，非本阶段交付）
+## 15. 建议实现顺序（已按实现完成度标注）
 
-1. D1 表结构与 `(device_id, ts)` 索引  
-2. 自建登录与会话（users/sessions）  
-3. 设备与 Token 管理 API（登录后生成 Token，仅哈希入库）  
-4. 设备上报 API（Bearer Token → 写 `readings`）  
-5. 人侧查询 API + **自动降采样**  
-6. Pages Dash：登录、设备选择、时间范围、综合/分项图、当前值  
-7. CSV 导出（同范围、同鉴权、同粒度策略 + 行数上限）  
-8. ESP32-C3 固件：SHT40+BMP280 采样 + HTTPS 上报（**已交付** → `ESP32/`）  
-9. 备份与运维：D1 定期导出说明  
+1. [x] D1 表结构与 `(device_id, ts)` 索引 — `schema.sql` / `src/lib/schema.js`  
+2. [x] 自建登录与会话（users/sessions）— `src/routes/auth.js`  
+3. [x] 设备与 Token 管理 API（登录后生成 Token，仅哈希入库）— `src/routes/devices.js` / `tokens.js`  
+4. [x] 设备上报 API（Bearer Token → 写 `readings`）— `src/routes/readings.js`  
+5. [x] 人侧查询 API + **自动降采样** — `src/lib/downsample.js` + readings 路由  
+6. [x] Pages Dash：登录、设备选择、时间范围、综合/分项图、当前值 — `public/`（另含缩放/全屏）  
+7. [x] CSV 导出（同范围、同鉴权、同粒度策略 + 行数上限）— `src/routes/export.js` + 单测  
+8. [x] ESP32-C3 固件：SHT40+BMP280 采样 + HTTPS 上报 — `ESP32/`（本机已构建）  
+9. [ ] 备份与运维：D1 定期导出说明 — **部分**（README 有说明，无自动化脚本/流程文档）  
+10. [ ] 线上部署与真机端到端 — **待运维/联调**（`database_id` 占位符）  
 
 ---
 
 ## 16. 验收要点（实现完成后对照）
 
-- [ ] 未登录不能打开数据 API；未持设备 Token 不能 POST 读数  
-- [ ] 5 分钟上报落库，字段口径：T/H 来自 SHT40，P 来自 BMP280（固件实现见 `ESP32/main/main.c`，口径在采样与 JSON 组装处强制）  
-- [ ] 库中原始行永久保留；长范围查询自动降粗并在 UI 标明  
-- [ ] Dash 默认当天；可切换综合/分项；数据同一套查询结果  
-- [ ] 可生成设备 Token（仅一次明文）、可吊销、吊销后上报失败  
-- [ ] 可新增第二台设备而无需改架构  
-- [ ] CSV 列顺序正确；当天为原始点，长范围为降采样点；鉴权正确  
-- [ ] 登录、会话、CSRF、Token 哈希等安全项符合第 12 节  
+> 代码侧能力已在本机核验：`npm run check` 通过；`npm run test:unit` 全部通过。  
+> 标注 **[代码已对齐]** 表示实现在源码中可确认；标注 **[待联调]** 表示需真实环境/线上才能闭环。
+
+- [x] 未登录不能打开数据 API；未持设备 Token 不能 POST 读数 **[代码已对齐：路由层会话/设备 Token 分离鉴权]**
+- [x] 5 分钟上报落库，字段口径：T/H 来自 SHT40，P 来自 BMP280 **[代码已对齐：`ESP32/main/main.c` 采样与 JSON 组装]**
+- [x] 库中原始行永久保留；长范围查询自动降粗并在 UI 标明 **[代码已对齐：`readings` 无 TTL；Dash `chart-sub` 显示粒度]**
+- [x] Dash 默认当天；可切换综合/分项；数据同一套查询结果 **[代码已对齐：`public/js/app.js` + 同一 `GET /api/v1/readings`]**
+- [x] 可生成设备 Token（仅一次明文）、可吊销、吊销后上报失败 **[代码已对齐：tokens 路由 + readings 上报时校验 revoked_at]**；真机验证 **[待联调]**
+- [x] 可新增第二台设备而无需改架构 **[代码已对齐：全链路 `device_id`，禁止单设备假设]**
+- [x] CSV 列顺序正确；当天为原始点，长范围为降采样点；鉴权正确 **[代码已对齐 + 单测覆盖导出策略]**
+- [x] 登录、会话、CSRF、Token 哈希等安全项符合第 12 节 **[代码已对齐；密码为 PBKDF2 见 §14.9]**
+- [ ] 线上 Worker + D1 可用（`database_id` 已回填、`deploy` + `db:remote` 成功） **[待运维]**
+- [ ] 真机 HTTPS 上报到线上域名并出现在 Dash **[待联调]**
+
+### 实现相对需求的增量（非阻塞）
+
+| 项 | 说明 |
+|----|------|
+| 图表时间轴缩放/平移/全屏 | `public/js/charts.js` / `app.js`，超出 §8 基线，体验增强 |
+| Token 硬删除 | `DELETE /api/v1/tokens/:id?purge=1`，仅已吊销记录可删 |
+| `loadSeries` 安全护栏单测 | `tools/test_load_series_mock.mjs`、`test_export_strategy.mjs` |
+| 展示时区可配置 | 环境变量 `TZ_DISPLAY`（默认 Asia/Shanghai） |
 
 ---
 
@@ -499,12 +515,14 @@ Dash 默认范围：**当天**（产品时区下的本地日界 → 当前时刻
 
 | 模块 | 状态 | 位置 |
 |------|------|------|
-| Cloudflare Worker API + D1 | 已实现 | `src/` · `schema.sql` · `wrangler.jsonc` |
-| Web Dash（登录/曲线/CSV/Token） | 已实现 | `public/` |
-| 本地联调工具 | 已实现 | `tools/submit_readings.py` · `tools/local_e2e.py` |
-| ESP32-C3 固件上报 | 已实现 | `ESP32/`（配置模板 `main/thp_config.h.example`） |
-| D1 线上 `database_id` | 待运维 | `wrangler.jsonc` 仍为占位符时需 `wrangler d1 create` 后回填 |
-| 真机 Token 联调 | 待操作 | Dash 生成 Token → 填入 `ESP32/main/thp_config.h` → 烧录 |
+| Cloudflare Worker API + D1 | **已实现**（本地可跑；线上未 deploy） | `src/` · `schema.sql` · `wrangler.jsonc` |
+| Web Dash（登录/曲线/CSV/Token/缩放/全屏） | **已实现** | `public/` |
+| 降采样与导出安全策略 | **已实现，单测通过** | `src/lib/downsample.js` · `src/routes/readings.js` · `export.js` |
+| 本地联调工具 | **已实现** | `tools/submit_readings.py` · `tools/local_e2e.py` |
+| 离线单元测试 | **已实现并通过** | `npm run test:unit` / `check` |
+| ESP32-C3 固件上报 | **已实现，本机已构建/产出烧录 bin** | `ESP32/`（`build/esp32c3_thp_report*.bin`，2026-09） |
+| D1 线上 `database_id` | **待运维** | `wrangler.jsonc` 仍为 `REPLACE_WITH_YOUR_D1_DATABASE_ID` |
+| 真机 Token 联调（线上） | **待操作** | Dash 生成 Token → 填入 `ESP32/main/thp_config.h` → 烧录；本地配置文件已存在（gitignored） |
 
 固件实现时对需求的硬约束对齐：
 
@@ -515,6 +533,13 @@ Dash 默认范围：**当天**（产品时区下的本地日界 → 当前时刻
 5. **重试**：网络/5xx 有限次退避；401/403/400 不重试（§10）。  
 6. **密钥**：`ESP32/main/thp_config.h` 不入库（§12.7），仓库仅保留 `.example` 模板。
 
+### 建议下一步
+
+1. `wrangler d1 create thp-dash` → 回填 `wrangler.jsonc` → `npm run deploy` + `npm run db:remote`  
+2. 线上 Dash 创建 admin / 设备 / Token  
+3. 固件 `THP_API_BASE` 改为线上 `https://…workers.dev`，`THP_DEVICE_TOKEN` 填新 Token 后烧录  
+4. 串口确认 `上报 HTTP 201`，Dash 出现曲线；再跑一遍 `python tools/local_e2e.py` 作本地回归
+
 ---
 
-*本文档整理自项目讨论中已确认的产品与技术约束，作为后续设计与实现的唯一需求基线。*
+*本文档整理自项目讨论中已确认的产品与技术约束，作为后续设计与实现的唯一需求基线。§14–§17 已按当前代码与构建物更新（2026-09）。*

@@ -28,26 +28,29 @@ Pages Dash（自建登录会话 Cookie）
 | 路径 | 说明 |
 |------|------|
 | `schema.sql` | D1 表结构（users/sessions/devices/api_tokens/readings） |
-| `wrangler.jsonc` | Worker + D1 + 静态资源绑定 |
+| `wrangler.jsonc` | Worker + D1 + 静态资源绑定（`database_id` 部署前需回填） |
 | `src/` | Worker 源码（鉴权、上报、查询、降采样、CSV） |
 | `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
 | `desktop-1280.png` | Dash 桌面端界面预览（README「界面预览」） |
-| `REQUIREMENTS.md` | 完整需求与已拍板决策 |
+| `REQUIREMENTS.md` | 完整需求、已拍板决策与实现状态 |
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
 | `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
 | `tools/local_e2e.py` | 本地登录→建设备→Token→上报 冒烟 |
+| `tools/test_export_strategy.mjs` | 降采样/导出策略纯函数单测（无需 D1） |
+| `tools/test_load_series_mock.mjs` | `loadSeries` 安全护栏 mock 单测（无需 wrangler） |
 | `ESP32/` | ESP32-C3 固件（SHT40+BMP280 → HTTPS 上报），见 [ESP32/README.md](./ESP32/README.md) |
 
 ## 功能对照
 
 - **设备上报** `POST /api/v1/readings`：Bearer Token；字段 temperature / humidity / pressure（+可选 measured_at、rssi）
 - **人侧 API**：登录后会话 Cookie；**全部业务接口鉴权**
-- **自建登录**：用户名密码（PBKDF2），会话 1 天滑动续期；**不用 Cloudflare Access**
-- **首次引导**：`GET/POST /api/auth/bootstrap` 创建第一个 admin
-- **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**
-- **查询** `GET /api/v1/readings`：默认当天，自动降采样
-- **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`；范围与当前选择一致（单设备）；**先 COUNT，再自动粒度**；超限/SQL 失败时**自动降一档**，不会为导出把长范围原始点整表拉进 Worker；响应头 `x-thp-coarsened=1` 表示已降采样
+- **自建登录**：用户名密码（PBKDF2-SHA256，Workers 上限 100000 迭代），会话 1 天滑动续期；**不用 Cloudflare Access**
+- **首次引导**：`GET/POST /api/auth/bootstrap` 创建第一个 admin；`POST /api/auth/migrate` 幂等建表
+- **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**（`DELETE …?purge=1`）
+- **查询** `GET /api/v1/readings`：默认当天，自动降采样；`GET /api/v1/latest` 提供当前值 + 在线状态
+- **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`（UTF-8 BOM）；范围与当前选择一致（单设备）；**先 COUNT，再自动粒度**；超限/SQL 失败时**自动降一档**，不会为导出把长范围原始点整表拉进 Worker；响应头 `x-thp-coarsened=1` 表示已降采样
 - **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板；**光标/点击查看曲线上任一时刻数据**
+- **Dash 交互增强（超出需求基线，已实现）**：时间轴**滚轮/双指缩放**、放大后**拖动平移**、「重置缩放」、图表**全屏**；离线阈值 **10 分钟**（2×上报周期）
 
 ## 部署（Cloudflare）
 
@@ -77,11 +80,14 @@ npx wrangler d1 execute thp-dash --file=./schema.sql --remote
 ### 4. 部署到 Cloudflare
 
 ```powershell
+# 前提：wrangler.jsonc 中 d1_databases[0].database_id 已是真实 id（当前仍为占位符时 deploy 会失败）
 npm run deploy
 npm run db:remote
 ```
 
 部署后首次访问站点创建 admin，再按「本地调试」中的步骤配置设备与 Token。
+
+> **当前状态**：`wrangler.jsonc` 的 `database_id` 仍是 `REPLACE_WITH_YOUR_D1_DATABASE_ID`。本地开发不依赖它；要上生产请先 `npx wrangler d1 create thp-dash` 并回填。
 
 ### 5. 设备上报（概念）
 
@@ -175,9 +181,22 @@ npm run dev
 |------|----------|------|
 | `npm run db:local` | `wrangler d1 execute thp-dash --file=./schema.sql --local` | 本地建表 |
 | `npm run db:remote` | 同上 `--remote` | 线上建表 |
+| `npm run db:tables` | 查本地 `sqlite_master` | 列出本地 D1 表 |
 | `npm run dev` | `wrangler dev` | 本地开发服务 |
-| `npm run deploy` | `wrangler deploy` | 部署 Worker |
-| `npm run check` | `node --check src/...` | 源码语法检查 |
+| `npm run deploy` | `wrangler deploy` | 部署 Worker（需先回填真实 `database_id`） |
+| `npm run check` | `node --check` 全部 `src/` + `public/js` | 源码语法检查（已通过） |
+| `npm run test:downsample` | `node tools/test_export_strategy.mjs` | 降采样/导出策略单测（无需 D1） |
+| `npm run test:loadseries` | `node tools/test_load_series_mock.mjs` | `loadSeries` 安全护栏 mock 单测 |
+| `npm run test:unit` | 上述两项 | 离线单元测试 |
+
+### 单元测试（不启 Worker）
+
+```powershell
+. .\node_env.ps1
+npm run test:unit
+```
+
+覆盖：时间范围 → 粒度阶梯、行数上限自动降档、SQL 失败时的安全回退、避免整表拉原始点等。本地 E2E 仍用 `python tools/local_e2e.py`（需 `npm run dev`）。
 
 ### 本地 HTTP 探测（PowerShell）
 
@@ -298,15 +317,19 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 ---
 
-### 图表数据拾取
+### 图表交互
 
 | 操作 | 行为 |
 |------|------|
 | 鼠标在曲线上移动 | 十字线吸附最近采样点，浮动提示显示该时刻温湿度气压 |
 | 点击 | **固定**选中点，图下方「选中时刻」读数条持续显示 |
-| 再次点击同一点 / Esc | 取消固定 |
+| 再次点击同一点 / Esc | 取消固定（图表全屏时 Esc 先退出全屏） |
 | 键盘 ←/→（画布聚焦时） | 逐点查看；Home/End 到首尾 |
-| 分项图 | 任一子图悬停/点击，三图十字线与读数条同步 |
+| 滚轮 / 触控板 / 双指捏合 | **缩放时间轴**（可放大到约 1–2 个采样间隔） |
+| 放大后横向拖动 | **平移**可见时间窗；双击不重置缩放 |
+| 「重置缩放」按钮 / 键盘 `0`/`R` | 恢复完整时间范围 |
+| 「全屏」按钮 | 图表全屏查看（原生 Fullscreen + CSS 兜底） |
+| 分项图 | 任一子图悬停/点击/缩放，三图十字线与读数条同步 |
 
 ## 自动降采样（v1）
 
@@ -332,18 +355,20 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - CORS：默认仅同源；跨域 Dash 用环境变量 `ALLOWED_ORIGINS`（逗号分隔完整 origin）  
 - 长范围查询/导出在 **SQL 侧** 自动降采样（失败时回退内存聚合）  
 
-## ESP32-C3 固件（已交付）
+## ESP32-C3 固件（已交付，本机已构建）
 
 固件工程在 [`ESP32/`](./ESP32/)，说明见 [ESP32/README.md](./ESP32/README.md)。
 
 - 框架：ESP-IDF（与 `G:\esp32s3\esp32c3_sensors` 同风格，自研 `sht40` / `bmp280` 驱动）
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
 - 节奏：默认 5 分钟 HTTPS `POST /api/v1/readings` + Bearer Token
-- 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**）
+- 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**；仓库仅 `.example`）
 - 重试：网络与 5xx 有限退避；401/403/400 不重发
-- 前置：Dash 新建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP
+- TLS：内嵌 Cloudflare 所用 GTS 根证书（`main/thp_tls_trust.h`），并关闭 IPv6 规避 AAAA 连不通
+- 本机构建：`ESP32/build/esp32c3_thp_report.bin` 与 `esp32c3_thp_report_flashed.bin` 已生成（2026-09）
+- 前置：Dash 新建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP；上生产须改为线上 Worker 域名并重新烧录
 
-更细的硬件、烧录与协议说明见 `ESP32/README.md`；需求条文见 `REQUIREMENTS.md` §4 / §10。
+更细的硬件、烧录与协议说明见 `ESP32/README.md`；需求条文见 `REQUIREMENTS.md` §4 / §10；交付状态见同文件 §17。
 
 ## 许可证
 
