@@ -44,8 +44,9 @@ export async function bootstrapStatus(env) {
  */
 export async function migrate(env, req) {
   const n = await ensureSchemaAndCountUsers(env);
+  let session = null;
   if (n > 0) {
-    const session = await requireUser(env, req);
+    session = await requireUser(env, req);
     if (!session || session.role !== 'admin') {
       return jsonError('需要管理员权限', 403);
     }
@@ -53,7 +54,7 @@ export async function migrate(env, req) {
     if (!ok) return jsonError('CSRF 校验失败', 403);
   }
   await ensureSchema(env);
-  return json({ ok: true, migrated: true });
+  return applyHeaders(json({ ok: true, migrated: true }), session?.cookieHeaders || []);
 }
 
 export async function bootstrapCreate(env, req) {
@@ -117,15 +118,25 @@ export async function logout(env, req) {
   return applyHeaders(json({ ok: true }), headers);
 }
 
+/** Attach sliding-session Set-Cookie headers (if any) to a Response. */
+function withSlidingCookies(res, session) {
+  const headers = session?.cookieHeaders;
+  if (!headers?.length) return res;
+  return applyHeaders(res, headers);
+}
+
 export async function meWithCsrf(env, req) {
   const session = await resolveUserSession(env, req);
   if (!session) return jsonError('未登录', 401);
   const cookies = parseCookies(req);
-  return json({
-    ok: true,
-    user: publicUser(session),
-    csrf: cookies[CSRF_COOKIE] || '',
-  });
+  return withSlidingCookies(
+    json({
+      ok: true,
+      user: publicUser(session),
+      csrf: cookies[CSRF_COOKIE] || '',
+    }),
+    session
+  );
 }
 
 export async function requireSessionAction(env, req, handler) {
@@ -133,5 +144,6 @@ export async function requireSessionAction(env, req, handler) {
   if (!session) return jsonError('未登录', 401);
   const ok = await assertCsrf(env, req, session);
   if (!ok) return jsonError('CSRF 校验失败', 403);
-  return handler(session);
+  const result = await handler(session);
+  return withSlidingCookies(result, session);
 }

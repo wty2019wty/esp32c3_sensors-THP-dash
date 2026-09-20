@@ -83,12 +83,14 @@ export async function resolveUserSession(env, req) {
     await env.DB.prepare(`DELETE FROM sessions WHERE id = ?`).bind(row.session_id).run();
     return null;
   }
-  // Sliding session: every successful auth extends expires_at by SESSION_DAYS
+  // Sliding session: every successful auth extends expires_at AND re-issues cookies
+  // so browser Max-Age tracks the same window (otherwise cookie dies at login+SESSION_DAYS).
   const now = new Date();
   const newExpires = addDaysIso(SESSION_DAYS, now);
   await env.DB.prepare(`UPDATE sessions SET last_used_at = ?, expires_at = ? WHERE id = ?`)
     .bind(now.toISOString(), newExpires, row.session_id)
     .run();
+  const cookieHeaders = slidingCookieHeaders({ secret, csrf: cookies[CSRF_COOKIE] || '' });
   return {
     sessionId: row.session_id,
     userId: row.user_id,
@@ -96,7 +98,33 @@ export async function resolveUserSession(env, req) {
     role: row.role,
     csrfHash: row.csrf_hash,
     expiresAt: newExpires,
+    cookieHeaders,
   };
+}
+
+/** Set-Cookie pairs that refresh session + CSRF Max-Age to SESSION_MAX_AGE. */
+export function slidingCookieHeaders({ secret, csrf }) {
+  if (!secret) return [];
+  const headers = [
+    ['set-cookie', serializeCookie(SESSION_COOKIE, secret, {
+      maxAge: SESSION_MAX_AGE,
+      httpOnly: true,
+      secure: true,
+      sameSite: 'Lax',
+    })],
+  ];
+  if (csrf) {
+    headers.push([
+      'set-cookie',
+      serializeCookie(CSRF_COOKIE, csrf, {
+        maxAge: SESSION_MAX_AGE,
+        httpOnly: false,
+        secure: true,
+        sameSite: 'Lax',
+      }),
+    ]);
+  }
+  return headers;
 }
 
 export async function requireUser(env, req) {

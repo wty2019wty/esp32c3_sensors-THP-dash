@@ -179,7 +179,7 @@ function yOf(val, bounds, padT, plotH) {
   return padT + plotH - ((val - bounds.min) / (bounds.max - bounds.min || 1)) * plotH;
 }
 
-/** Full timestamp bounds of a series */
+/** Full timestamp bounds of a series. Single-point / equal-ts series get a small pad window. */
 export function dataBounds(points) {
   if (!points || !points.length) return null;
   let min = Infinity;
@@ -190,7 +190,12 @@ export function dataBounds(points) {
     if (t < min) min = t;
     if (t > max) max = t;
   }
-  if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) return null;
+  if (!Number.isFinite(min) || !Number.isFinite(max) || min > max) return null;
+  if (min === max) {
+    // One sample (or all identical ts): expand so the point is drawable, not blank.
+    const pad = Math.max(MIN_SPAN_MS, estimateIntervalMs(points));
+    return { min: min - pad / 2, max: max + pad / 2 };
+  }
   return { min, max };
 }
 

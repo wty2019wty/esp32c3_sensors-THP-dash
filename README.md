@@ -41,7 +41,7 @@ Pages Dash（自建登录会话 Cookie）
 
 - **设备上报** `POST /api/v1/readings`：Bearer Token；字段 temperature / humidity / pressure（+可选 measured_at、rssi）
 - **人侧 API**：登录后会话 Cookie；**全部业务接口鉴权**
-- **自建登录**：用户名密码（PBKDF2），会话 14 天滑动；**不用 Cloudflare Access**
+- **自建登录**：用户名密码（PBKDF2），会话 1 天滑动续期；**不用 Cloudflare Access**
 - **首次引导**：`GET/POST /api/auth/bootstrap` 创建第一个 admin
 - **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**
 - **查询** `GET /api/v1/readings`：默认当天，自动降采样
@@ -325,7 +325,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - 密码：PBKDF2-SHA256（迭代 210000）  
 - 设备 Token / 会话：只存 SHA-256 哈希  
 - 会话 Cookie：HttpOnly + Secure + SameSite=Lax  
-- 会话 **滑动续期** 14 天（每次鉴权延长 `expires_at`）  
+- 会话 **滑动续期** 1 天（每次鉴权延长 `expires_at` 并刷新 Cookie `Max-Age`）  
 - 登录失败限速（Cache API，窗口 15 分钟，尽力而为）  
 - Token 明文仅生成响应中出现一次  
 - CORS：默认仅同源；跨域 Dash 用环境变量 `ALLOWED_ORIGINS`（逗号分隔完整 origin）  
