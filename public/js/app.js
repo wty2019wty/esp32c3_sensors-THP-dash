@@ -75,9 +75,15 @@ function isNarrowViewport() {
 function updateChartHelp() {
   const el = $('#chart-help');
   if (!el) return;
+  if (chartFs.open) {
+    el.textContent = isCoarsePointer()
+      ? '双指缩放时间轴；横向拖动平移。点选查看数据；点「退出全屏」或 Esc 返回。'
+      : '滚轮/触控板缩放时间轴；放大后拖动平移。悬停查看数据；Esc 或点「退出全屏」返回。';
+    return;
+  }
   el.textContent = isCoarsePointer()
-    ? '双指缩放时间轴；横向拖动平移。点选曲线查看该时刻数据；需要时点「重置缩放」恢复全程。'
-    : '滚轮/触控板缩放时间轴（可放大到采样点附近）；放大后拖动平移。悬停查看数据，点击固定；点「重置缩放」恢复全程。';
+    ? '双指缩放时间轴；横向拖动平移。点选曲线查看该时刻数据；需要时点「重置缩放」恢复全程。点「全屏」放大查看图表。'
+    : '滚轮/触控板缩放时间轴（可放大到采样点附近）；放大后拖动平移。悬停查看数据，点击固定；点「重置缩放」恢复全程。点「全屏」放大查看图表。';
 }
 
 const state = {
@@ -91,6 +97,12 @@ const state = {
   series: new Set(['temperature', 'humidity', 'pressure']),
   points: [],
   granularity: null,
+};
+
+/** Fullscreen chart (PC + mobile) */
+const chartFs = {
+  open: false,
+  nativeFs: false,
 };
 
 /** Time-axis zoom window (ms); null = full range */
@@ -149,7 +161,48 @@ function updateZoomUI() {
   }
 }
 
-function drawChartsNow() {
+function chartPanel() {
+  return $('.chart-panel');
+}
+
+/** Measure canvas CSS heights for normal vs fullscreen chart layouts. */
+function chartCssHeights() {
+  if (!chartFs.open) return null;
+  const combinedHost = $('#chart-combined');
+  const splitHost = $('#chart-split');
+  const view = state.view;
+
+  if (view === 'split') {
+    const host = splitHost;
+    if (!host || host.hidden || host.classList.contains('hidden')) {
+      return { combined: null, split: 140 };
+    }
+    const styles = getComputedStyle(host);
+    const padY =
+      (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0);
+    const hostH = host.clientHeight || window.innerHeight;
+    const items = $$('.split-item', host);
+    const labels = items.reduce((sum, item) => {
+      const h3 = item.querySelector('h3');
+      return sum + (h3 ? h3.offsetHeight + 4 : 18);
+    }, 0);
+    const gaps = Math.max(0, (items.length - 1)) * 6;
+    const avail = Math.max(60, hostH - padY - labels - gaps);
+    const per = Math.floor(avail / Math.max(1, items.length || 3));
+    return { combined: null, split: Math.max(80, per) };
+  }
+
+  const host = combinedHost;
+  if (!host || host.hidden || host.classList.contains('hidden')) {
+    return { combined: 360, split: null };
+  }
+  const styles = getComputedStyle(host);
+  const padY = (parseFloat(styles.paddingTop) || 0) + (parseFloat(styles.paddingBottom) || 0);
+  const hostH = host.clientHeight || window.innerHeight;
+  return { combined: Math.max(160, hostH - padY), split: null };
+}
+
+function paintCharts() {
   if (!state.points.length) return;
   drawAll(
     $('#canvas-combined'),
@@ -158,9 +211,14 @@ function drawChartsNow() {
     state.view,
     state.series,
     cursor.index,
-    currentXWindow()
+    currentXWindow(),
+    chartCssHeights()
   );
   updateCursorUI();
+}
+
+function drawChartsNow() {
+  paintCharts();
 }
 
 function show(view) {
@@ -242,13 +300,24 @@ function updateCursorUI() {
   const empty = state.points.length === 0;
   const info = !empty && cursor.index != null ? pointAt(state.points, cursor.index) : null;
 
+  // Keep the readout bar mounted at all times so the chart never jumps.
+  readout.hidden = false;
+  readout.classList.toggle('is-empty', !info);
+
   if (!info) {
-    readout.hidden = true;
     tip.hidden = true;
+    $('#readout-ts').textContent = empty ? '—' : '未选中';
+    $('#readout-hint').textContent = empty
+      ? '当前范围内没有数据'
+      : isCoarsePointer()
+        ? '点选曲线可查看该时刻数据'
+        : '在曲线上悬停或点击，可查看该时刻数据';
+    $('#readout-t').textContent = '—';
+    $('#readout-h').textContent = '—';
+    $('#readout-p').textContent = '—';
     return;
   }
 
-  readout.hidden = false;
   $('#readout-ts').textContent = info.label;
   $('#readout-hint').textContent = cursor.pinned
     ? isCoarsePointer()
@@ -265,7 +334,7 @@ function updateCursorUI() {
   };
   for (const v of info.values) {
     const el = $(map[v.key]);
-    if (el) el.textContent = fmtNum(v.value, v.key === 'pressure' ? 1 : 1);
+    if (el) el.textContent = fmtNum(v.value, 1);
   }
 
   // Floating tooltip is for mouse hover; on touch/narrow use the readout bar.
@@ -314,7 +383,8 @@ function ensureCursorBinding() {
         state.view,
         state.series,
         empty ? null : index,
-        currentXWindow()
+        currentXWindow(),
+        chartCssHeights()
       );
       updateCursorUI();
       updateZoomUI();
@@ -329,7 +399,7 @@ function ensureCursorBinding() {
   }
 
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && cursor.index != null) {
+    if (e.key === 'Escape' && cursor.index != null && !chartFs.open) {
       cursor.ctrl?.clear();
     }
   });
@@ -348,6 +418,125 @@ function setStats(device) {
   $('#stat-seen').innerHTML = seen
     ? `最近上报 <time title="${escapeHtml(seen)}">${escapeHtml(fmtTime(seen))}</time> · <span class="${online ? 'ok' : 'bad'}">${online ? '在线' : '离线/未知'}</span>`
     : '尚无上报';
+}
+
+async function enterNativeFullscreen(el) {
+  if (!el) return false;
+  try {
+    if (el.requestFullscreen) {
+      await el.requestFullscreen({ navigationUI: 'hide' });
+      return true;
+    }
+    if (el.webkitRequestFullscreen) {
+      el.webkitRequestFullscreen();
+      return true;
+    }
+    if (el.msRequestFullscreen) {
+      el.msRequestFullscreen();
+      return true;
+    }
+  } catch {
+    /* denied / unsupported — CSS fullscreen still works */
+  }
+  return false;
+}
+
+async function exitNativeFullscreen() {
+  try {
+    if (document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement) {
+      if (document.exitFullscreen) await document.exitFullscreen();
+      else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      else if (document.msExitFullscreen) document.msExitFullscreen();
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+function updateChartFsButton() {
+  const btn = $('#btn-fs-chart');
+  if (!btn) return;
+  btn.textContent = chartFs.open ? '退出全屏' : '全屏';
+  btn.title = chartFs.open ? '退出图表全屏' : '全屏查看温湿度气压图表';
+  btn.setAttribute('aria-pressed', chartFs.open ? 'true' : 'false');
+}
+
+function setChartCanvasTouchAction(mode) {
+  for (const sel of ['#canvas-combined', '#canvas-t', '#canvas-h', '#canvas-p']) {
+    const el = $(sel);
+    if (el) el.style.touchAction = mode;
+  }
+}
+
+async function openChartFullscreen() {
+  const panel = chartPanel();
+  if (!panel || chartFs.open) return;
+  chartFs.open = true;
+  panel.classList.add('chart-fullscreen');
+  document.body.classList.add('chart-fs-open');
+  updateChartFsButton();
+  updateChartHelp();
+  // Fullscreen: keep gestures on the chart (pinch/pan), not page scroll
+  setChartCanvasTouchAction('none');
+
+  // Prefer Fullscreen API (hides browser chrome). CSS fixed layout is fallback.
+  chartFs.nativeFs = await enterNativeFullscreen(panel);
+
+  // Layout after class + fullscreen so clientHeight is correct
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      renderCharts();
+    });
+  });
+}
+
+async function closeChartFullscreen() {
+  const panel = chartPanel();
+  if (!chartFs.open) return;
+  chartFs.open = false;
+  panel?.classList.remove('chart-fullscreen');
+  document.body.classList.remove('chart-fs-open');
+  updateChartFsButton();
+  updateChartHelp();
+  setChartCanvasTouchAction('pan-y');
+  if (chartFs.nativeFs) {
+    chartFs.nativeFs = false;
+    await exitNativeFullscreen();
+  }
+  requestAnimationFrame(() => {
+    renderCharts();
+  });
+}
+
+function toggleChartFullscreen() {
+  if (chartFs.open) return closeChartFullscreen();
+  return openChartFullscreen();
+}
+
+function bindChartFullscreen() {
+  $('#btn-fs-chart')?.addEventListener('click', () => {
+    toggleChartFullscreen();
+  });
+
+  const onFsChange = () => {
+    const active =
+      document.fullscreenElement || document.webkitFullscreenElement || document.msFullscreenElement;
+    // User left native fullscreen via Esc / browser chrome
+    if (!active && chartFs.open && chartFs.nativeFs) {
+      closeChartFullscreen();
+    }
+  };
+  document.addEventListener('fullscreenchange', onFsChange);
+  document.addEventListener('webkitfullscreenchange', onFsChange);
+
+  // Esc exits chart fullscreen first
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && chartFs.open) {
+      // Native fullscreen often exits itself; sync UI either way
+      closeChartFullscreen();
+      e.preventDefault();
+    }
+  });
 }
 
 function renderCharts() {
@@ -379,22 +568,13 @@ function renderCharts() {
   if (empty) chartZoom.win = null;
 
   if (empty) {
-    $('#chart-readout').hidden = true;
     $('#chart-tooltip').hidden = true;
+    updateCursorUI();
     updateZoomUI();
     return;
   }
 
-  drawAll(
-    $('#canvas-combined'),
-    { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
-    state.points,
-    state.view,
-    state.series,
-    cursor.index,
-    currentXWindow()
-  );
-  updateCursorUI();
+  paintCharts();
   updateZoomUI();
 }
 
@@ -684,13 +864,18 @@ $('#btn-apply-range')?.addEventListener('click', async () => {
 
 $('#btn-reset-zoom')?.addEventListener('click', () => resetZoom());
 
-$$('.seg').forEach((btn) => {
-  btn.addEventListener('click', () => {
-    state.view = btn.dataset.view;
-    $$('.seg').forEach((b) => b.classList.toggle('active', b === btn));
-    renderCharts();
-    updateCursorUI();
+function setChartView(view) {
+  if (view !== 'combined' && view !== 'split') return;
+  state.view = view;
+  $$('[data-view]').forEach((b) => {
+    b.classList.toggle('active', b.dataset.view === view);
   });
+  renderCharts();
+  updateCursorUI();
+}
+
+$$('.seg').forEach((btn) => {
+  btn.addEventListener('click', () => setChartView(btn.dataset.view));
 });
 
 $$('.legend-item').forEach((btn) => {
@@ -844,4 +1029,6 @@ window.addEventListener('resize', onViewportChange);
 window.addEventListener('orientationchange', onViewportChange);
 
 updateChartHelp();
+updateChartFsButton();
+bindChartFullscreen();
 boot();

@@ -95,10 +95,6 @@
             <button type="button" class="btn ghost" id="btn-apply-range">应用</button>
           </div>
           <div class="topbar-row">
-            <div class="segmented" role="group" aria-label="视图模式">
-              <button type="button" class="seg active" data-view="combined" id="btn-view-combined">综合</button>
-              <button type="button" class="seg" data-view="split" id="btn-view-split">分项</button>
-            </div>
             <div class="topbar-actions">
               <button type="button" class="btn" id="btn-export">导出 CSV</button>
               <button type="button" class="btn ghost" id="btn-admin" hidden>管理</button>
@@ -139,6 +135,11 @@
               <p class="panel-sub" id="chart-sub">默认当天 · 自动粒度</p>
             </div>
             <div class="panel-head-right">
+              <div class="segmented chart-view-seg" role="group" aria-label="图表视图模式">
+                <button type="button" class="seg active" data-view="combined" data-chart-view>综合</button>
+                <button type="button" class="seg" data-view="split" data-chart-view>分项</button>
+              </div>
+              <button type="button" class="btn" id="btn-fs-chart" title="全屏查看温湿度气压图表">全屏</button>
               <button type="button" class="btn ghost" id="btn-reset-zoom" hidden title="恢复完整时间范围">重置缩放</button>
               <div class="legend" id="legend">
                 <button type="button" class="legend-item active" data-series="temperature">
@@ -170,11 +171,11 @@
               <canvas id="canvas-p" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
             </div>
           </div>
-          <div id="chart-readout" class="chart-readout" hidden>
+          <div id="chart-readout" class="chart-readout">
             <div class="readout-time">
               <span class="readout-label">选中时刻</span>
               <strong id="readout-ts">—</strong>
-              <span class="readout-hint" id="readout-hint">点选可查看 · 再次点选取消</span>
+              <span class="readout-hint" id="readout-hint">点选曲线可查看该时刻数据</span>
             </div>
             <div class="readout-vals">
               <div class="rv temp"><span>温度</span><strong id="readout-t">—</strong><em>°C</em></div>

@@ -574,14 +574,16 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
   return { xMin, xMax, xSpan, box, bounds, kind: 'split', key, dataMin, dataMax };
 }
 
-export function drawAll(combinedCanvas, splitCanvases, points, view, seriesSet, cursorIndex = null, xWindow = null) {
+export function drawAll(combinedCanvas, splitCanvases, points, view, seriesSet, cursorIndex = null, xWindow = null, cssHeights = null) {
   const win = xWindow || null;
+  const combinedH = cssHeights?.combined;
+  const splitH = cssHeights?.split;
   if (view === 'split') {
-    drawSeriesChart(splitCanvases.t, points, 'temperature', { cursorIndex, xWindow: win });
-    drawSeriesChart(splitCanvases.h, points, 'humidity', { cursorIndex, xWindow: win });
-    drawSeriesChart(splitCanvases.p, points, 'pressure', { cursorIndex, xWindow: win });
+    drawSeriesChart(splitCanvases.t, points, 'temperature', { cursorIndex, xWindow: win, cssHeight: splitH });
+    drawSeriesChart(splitCanvases.h, points, 'humidity', { cursorIndex, xWindow: win, cssHeight: splitH });
+    drawSeriesChart(splitCanvases.p, points, 'pressure', { cursorIndex, xWindow: win, cssHeight: splitH });
   } else {
-    drawCombined(combinedCanvas, points, { series: [...seriesSet], cursorIndex, xWindow: win });
+    drawCombined(combinedCanvas, points, { series: [...seriesSet], cursorIndex, xWindow: win, cssHeight: combinedH });
   }
 }
 
