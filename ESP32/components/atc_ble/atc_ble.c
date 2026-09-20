@@ -17,6 +17,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 /* IDF 6.x / mbedtls 4：CCM 走 PSA，不再暴露 mbedtls/ccm.h */
@@ -44,9 +45,12 @@ static bool s_has_bindkey;
 static bool s_scanning;
 static bool s_inited;
 static bool s_synced;
+static bool s_scan_wanted = true; /* HTTP 期间短暂 false，由任务续扫 */
 static uint8_t s_own_addr_type;
 
+static int gap_on_event(struct ble_gap_event *event, void *arg);
 static void start_scan_locked(void);
+static void scan_sup_task(void *arg);
 
 /* ---------------- helpers ---------------- */
 
@@ -305,18 +309,17 @@ static void handle_adv_raw(const uint8_t addr_msb[6], int8_t rssi,
                     memcpy(s.mac, addr_msb, 6);
                     s.rssi = rssi;
                     cache_store(&s);
-                    ESP_LOGI(TAG, "ATC帧%s t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
-                             (after_len >= 15 && ad_elem[0] >= 18) ? "(clear)" : "(enc)",
+                    ESP_LOGI(TAG, "ATC帧 t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
                              (double)s.temperature, (double)s.humidity,
                              s.battery_pct == 0xFF ? 0 : s.battery_pct,
                              (int)rssi,
                              addr_msb[0], addr_msb[1], addr_msb[2],
                              addr_msb[3], addr_msb[4], addr_msb[5]);
                 } else {
-                    ESP_LOGD(TAG, "0x181A 未能解析 mac=%02X:%02X:%02X:%02X:%02X:%02X ad_len=%u after=%u",
+                    ESP_LOGD(TAG, "0x181A 未解析 mac=%02X:%02X:%02X:%02X:%02X:%02X after=%u",
                              addr_msb[0], addr_msb[1], addr_msb[2],
                              addr_msb[3], addr_msb[4], addr_msb[5],
-                             ad_len, after_len);
+                             after_len);
                 }
             }
         }
@@ -346,12 +349,9 @@ static int gap_on_event(struct ble_gap_event *event, void *arg)
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
-        ESP_LOGD(TAG, "扫描结束 reason=%d，自动续扫", event->disc_complete.reason);
+        /* 禁止在 GAP 回调里调 ble_gap_disc（易与 host 死锁）；由 sup 任务续扫 */
+        ESP_LOGD(TAG, "DISC_COMPLETE reason=%d", event->disc_complete.reason);
         s_scanning = false;
-        /* 主动 cancel（HTTP 暂停）时不自动续扫，由调用方 start */
-        if (event->disc_complete.reason != BLE_HS_EALREADY) {
-            start_scan_locked();
-        }
         return 0;
     default:
         return 0;
@@ -360,7 +360,7 @@ static int gap_on_event(struct ble_gap_event *event, void *arg)
 
 static void start_scan_locked(void)
 {
-    if (!s_synced) {
+    if (!s_synced || !s_scan_wanted) {
         return;
     }
     if (s_scanning) {
@@ -369,20 +369,42 @@ static void start_scan_locked(void)
     struct ble_gap_disc_params p;
     memset(&p, 0, sizeof(p));
     p.passive = 1;
-    /* 持续扫描：payload 变化仍会上报；去重仅滤完全相同广播 */
-    p.filter_duplicates = 1;
+    p.filter_duplicates = 0;
     p.itvl = 0;
     p.window = 0;
     p.filter_policy = 0;
     p.limited = 0;
 
-    /* BLE_HS_FOREVER：一直扫，直到 stop 或 disc_complete 后由回调续扫 */
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_on_event, NULL);
     if (rc == 0) {
         s_scanning = true;
         ESP_LOGI(TAG, "ATC BLE 持续扫描开始");
     } else if (rc != BLE_HS_EALREADY) {
         ESP_LOGW(TAG, "ble_gap_disc rc=%d", rc);
+    }
+}
+
+/** 独立任务负责启停扫描，避免在 NimBLE 回调里调 GAP API */
+static void scan_sup_task(void *arg)
+{
+    (void)arg;
+    int beat = 0;
+    for (;;) {
+        if (s_inited && s_synced && s_scan_wanted && !s_scanning) {
+            start_scan_locked();
+        }
+        beat++;
+        if (beat >= 15) { /* ~30s @ 2s */
+            beat = 0;
+            atc_ble_sample_t s;
+            bool ok = atc_ble_pop_latest(&s);
+            ESP_LOGI(TAG, "ATC心跳 scan=%d wanted=%d cache=%s age=%lldms heap=%u",
+                     (int)s_scanning, (int)s_scan_wanted,
+                     ok ? "ok" : "none",
+                     ok ? (long long)((esp_timer_get_time() / 1000) - s.ts_ms) : -1LL,
+                     (unsigned)esp_get_free_heap_size());
+        }
+        vTaskDelay(pdMS_TO_TICKS(2000));
     }
 }
 
@@ -398,8 +420,7 @@ static void on_sync(void)
         s_own_addr_type = BLE_OWN_ADDR_PUBLIC;
     }
     s_synced = true;
-    ESP_LOGI(TAG, "NimBLE synced，准备扫描");
-    start_scan_locked();
+    ESP_LOGI(TAG, "NimBLE synced");
 }
 
 static void on_reset(int reason)
@@ -455,6 +476,12 @@ esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16])
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
     nimble_port_freertos_init(host_task);
+
+    BaseType_t ok = xTaskCreate(scan_sup_task, "atc_scan", 3072, NULL, 4, NULL);
+    if (ok != pdPASS) {
+        ESP_LOGW(TAG, "scan_sup_task 创建失败，扫描可能无法自动续启");
+    }
+    s_scan_wanted = true;
     s_inited = true;
     return ESP_OK;
 }
@@ -464,8 +491,9 @@ esp_err_t atc_ble_start_scan(void)
     if (!s_inited) {
         return ESP_ERR_INVALID_STATE;
     }
+    s_scan_wanted = true;
     if (!s_synced) {
-        return ESP_ERR_INVALID_STATE;
+        return ESP_OK; /* sup 任务会在 sync 后启动 */
     }
     start_scan_locked();
     return ESP_OK;
@@ -476,10 +504,11 @@ esp_err_t atc_ble_stop_scan(void)
     if (!s_inited) {
         return ESP_OK;
     }
+    s_scan_wanted = false;
     if (s_scanning) {
         ble_gap_disc_cancel();
         s_scanning = false;
-        ESP_LOGI(TAG, "ATC BLE 扫描停止（HTTP/调试）");
+        ESP_LOGI(TAG, "ATC BLE 扫描暂停（HTTP/调试）");
     }
     return ESP_OK;
 }

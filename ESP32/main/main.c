@@ -1171,7 +1171,19 @@ static void thp_report_task(void *arg)
         report_mi_if_ready();
 #endif
 
-        vTaskDelay(pdMS_TO_TICKS(THP_REPORT_PERIOD_MS));
+        /* 分片 delay + 心跳：避免 5 分钟静默期看起来像死机 */
+        {
+            int left = THP_REPORT_PERIOD_MS;
+            while (left > 0) {
+                int chunk = left > 30000 ? 30000 : left;
+                vTaskDelay(pdMS_TO_TICKS(chunk));
+                left -= chunk;
+                if (left > 0) {
+                    ESP_LOGI(TAG, "心跳 heap=%u 下一上报约 %ds 后",
+                             (unsigned)esp_get_free_heap_size(), left / 1000);
+                }
+            }
+        }
     }
 }
 
