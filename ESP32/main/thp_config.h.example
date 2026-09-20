@@ -18,6 +18,14 @@
 /* 最长等待 Wi-Fi 连接成功的时间（毫秒）；超时后进入重试循环 */
 #define THP_WIFI_CONNECT_TIMEOUT_MS  30000
 
+/* STA 最大发射功率（dBm），有效约 8~20。
+ * 部分 ESP32-C3 Super Mini 板载天线差：默认 20 dBm 时开放认证易失败
+ * （AUTH_EXPIRE / reason=2），或连上极不稳定。参考
+ * G:\esp32s3\esp32c3-ir-web-ESP32-C3 默认压到 15 dBm。
+ * 仍连不上可再降到 8~12；信号远、丢包多时可略升（勿超过 20）。
+ */
+#define THP_WIFI_STA_TX_POWER_DBM   15
+
 /* ---------------- THP API ----------------
  * 本地 wrangler dev 示例：
  *   http://192.168.1.10:8787

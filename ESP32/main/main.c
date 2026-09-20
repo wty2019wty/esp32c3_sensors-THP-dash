@@ -153,6 +153,21 @@ static esp_err_t wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    /* 部分 ESP32-C3 Super Mini 天线差：默认 20 dBm 易 AUTH_EXPIRE / 极不稳定。
+     * 参考 esp32c3-ir-web-ESP32-C3：esp_wifi_set_max_tx_power 单位为 0.25 dBm。 */
+    int8_t tx_dbm = (int8_t)THP_WIFI_STA_TX_POWER_DBM;
+    if (tx_dbm < 8) {
+        tx_dbm = 8;
+    } else if (tx_dbm > 20) {
+        tx_dbm = 20;
+    }
+    esp_err_t pwr_err = esp_wifi_set_max_tx_power((int8_t)(tx_dbm * 4));
+    if (pwr_err != ESP_OK) {
+        ESP_LOGW(TAG, "set max TX power (%d dBm) failed: %s", (int)tx_dbm, esp_err_to_name(pwr_err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi STA max TX power = %d dBm", (int)tx_dbm);
+    }
+
     ESP_LOGI(TAG, "Wi-Fi STA 启动，SSID=%s", THP_WIFI_SSID);
 
     EventBits_t bits = xEventGroupWaitBits(

@@ -54,6 +54,7 @@ copy main\thp_config.h.example main\thp_config.h
 | 宏 | 说明 |
 | --- | --- |
 | `THP_WIFI_SSID` / `THP_WIFI_PASSWORD` | STA Wi-Fi |
+| `THP_WIFI_STA_TX_POWER_DBM` | STA 最大发射功率，**默认 15**（8~20）。部分 Super Mini 天线差，默认 20 dBm 易连不上；仍失败可降到 8~12（对齐 `esp32c3-ir-web-ESP32-C3`） |
 | `THP_API_BASE` | Worker 根地址，**不含** `/api/...`。本地：`http://<电脑局域网IP>:8787`；线上：`https://xxx.workers.dev` |
 | `THP_DEVICE_TOKEN` | Dash 管理页生成的上报 Token（`thp_...`，明文只显示一次） |
 | `THP_DEVICE_ID` | 可选；须与 Token 绑定设备一致，一般留空 |
@@ -113,6 +114,7 @@ Content-Type: application/json
 
 | 日志 | 含义 |
 | --- | --- |
+| `Wi-Fi STA max TX power = 15 dBm` | 已按配置限制发射功率（天线差的 Super Mini 用） |
 | `Wi-Fi 已连接，IP=...` | STA 就绪 |
 | `SNTP 时间已同步` | 将发送 `measured_at` |
 | `SHT40/BMP280 初始化成功` | 传感器在位 |
@@ -135,4 +137,5 @@ Content-Type: application/json
 1. I2C 走线建议短、外接 4.7kΩ 上拉；GPIO8 板载 LED 可能干扰 SDA。  
 2. 未做离线本地缓存队列：断网期间的数据不会补传（v1 与需求一致，服务端不依赖设备队列）。  
 3. TLS 使用系统证书捆绑包校验公网 HTTPS；本地 `http://IP:8787` 无需证书。  
-4. Token 更换后必须重新编译烧录（未做运行时配网/OTA）。
+4. Token 更换后必须重新编译烧录（未做运行时配网/OTA）。  
+5. **部分 Super Mini 天线较差**：默认把 `THP_WIFI_STA_TX_POWER_DBM` 设为 15（代码内再夹到 8~20）。若仍频繁断连，先降到 8~12，再查供电/距离/路由器信道；不要用超过 20 dBm “硬顶”。
