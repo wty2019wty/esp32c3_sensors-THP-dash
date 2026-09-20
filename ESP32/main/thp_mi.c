@@ -8,9 +8,12 @@
 #include "esp_timer.h"
 
 #include "thp_config.h"
+#include "thp_queue.h"
 #include "thp_report.h"
 #include "thp_time.h"
 #include "thp_types.h"
+
+static const char *TAG = "thp.mi";
 
 #ifndef THP_MI_ENABLE
 #define THP_MI_ENABLE 0
@@ -33,8 +36,6 @@
 #ifndef THP_MI_HEAP_MIN_REPORT
 #define THP_MI_HEAP_MIN_REPORT 70000
 #endif
-
-static const char *TAG = "thp.mi";
 
 #if THP_MI_ENABLE
 #include "atc_ble.h"
@@ -114,7 +115,7 @@ bool thp_mi_is_ready(void)
     return s_mi_ready;
 }
 
-void thp_mi_report_cycle(void)
+void thp_mi_report_cycle(TickType_t deadline)
 {
     if (!s_mi_ready) {
         return;
@@ -122,14 +123,6 @@ void thp_mi_report_cycle(void)
 
     if (!atc_ble_is_scanning()) {
         (void)atc_ble_start_scan();
-    }
-
-    unsigned heap = (unsigned)esp_get_free_heap_size();
-    if (heap < THP_MI_HEAP_MIN_REPORT) {
-        ESP_LOGW(TAG, "heap_free=%u < %d，本周期跳过 MI 上报",
-                 heap, THP_MI_HEAP_MIN_REPORT);
-        s_mi_period_start_ms = esp_timer_get_time() / 1000;
-        return;
     }
 
     atc_ble_sample_t mi;
@@ -148,14 +141,29 @@ void thp_mi_report_cycle(void)
     reading.has_p = false;
     reading.rssi = (int)mi.rssi;
 
-    ESP_LOGI(TAG, "MI 本周期样本 T=%.2f°C H=%.2f%% rssi=%d batt=%u age=%lldms iso=%s",
+    unsigned heap = (unsigned)esp_get_free_heap_size();
+    const int32_t remain = thp_deadline_remain_ms(deadline);
+
+    ESP_LOGI(TAG, "MI 本周期样本 T=%.2f°C H=%.2f%% rssi=%d batt=%u age=%lldms iso=%s heap=%u remain=%dms",
              (double)mi.temperature, (double)mi.humidity,
              (int)mi.rssi,
              mi.battery_pct == 0xFF ? 0 : mi.battery_pct,
              (long long)((esp_timer_get_time() / 1000) - mi.ts_ms),
-             reading.has_iso ? reading.iso : "(no-ts)");
+             reading.has_iso ? reading.iso : "(no-ts)",
+             heap, (int)remain);
 
-    thp_report_or_enqueue(&reading);
+    /* heap 不足或预算耗尽：不发 HTTP，但样本仍入队，避免丢数据 */
+    if (heap < THP_MI_HEAP_MIN_REPORT || thp_deadline_reached(deadline) ||
+        !thp_wifi_is_connected()) {
+        if (heap < THP_MI_HEAP_MIN_REPORT) {
+            ESP_LOGW(TAG, "heap_free=%u < %d，MI 读数直接入队", heap, THP_MI_HEAP_MIN_REPORT);
+        }
+        thp_queue_push(&reading);
+        s_mi_period_start_ms = esp_timer_get_time() / 1000;
+        return;
+    }
+
+    thp_report_or_enqueue(&reading, deadline);
     s_mi_period_start_ms = esp_timer_get_time() / 1000;
 }
 
@@ -172,8 +180,9 @@ bool thp_mi_is_ready(void)
     return false;
 }
 
-void thp_mi_report_cycle(void)
+void thp_mi_report_cycle(TickType_t deadline)
 {
+    (void)deadline;
 }
 
 #endif /* THP_MI_ENABLE */

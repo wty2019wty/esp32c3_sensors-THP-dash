@@ -66,14 +66,23 @@
 #define THP_OFFLINE_FLUSH_GAP_MS  200
 #define THP_OFFLINE_FLUSH_MAX_PER_CYCLE  24
 
-/* 单次 HTTP(S) 请求总超时（毫秒）。走 Cloudflare 时 TLS 握手偏慢，建议 ≥30s */
-#define THP_HTTP_TIMEOUT_MS     40000
+/* 单次 HTTP(S) 请求总超时（毫秒）。
+ * C3 上 BLE/Wi-Fi 共存，握手偏慢；15s 为预算与假失败的折中。
+ * 连接 keep-alive 复用落地前，不建议压到 12s 以下。
+ */
+#define THP_HTTP_TIMEOUT_MS     15000
+
+/* 周期 deadline = THP_REPORT_PERIOD_MS - margin。
+ * report/flush 在 deadline 后不再发起 HTTP；本地采样与 MI 缓存仍会入离线队列。
+ */
+#define THP_CYCLE_DEADLINE_MARGIN_MS  20000
 
 /* ---------------- NTP（measured_at；入库时间仍以服务端为准） ----------------
- * 每次 POST 前会调用 esp_netif_sntp_start() 重启查询并等待同步。
+ * 已同步时跳过；每 N 个周期才重启 SNTP 重同步（漂移检测二期）。
  * 服务器数量须 ≤ CONFIG_LWIP_SNTP_MAX_SERVERS（sdkconfig.defaults 已设 4）。
  * 国内优先：阿里云 / 国家授时中心；pool 作兜底。
  */
+#define THP_NTP_RESYNC_EVERY_CYCLES   12
 #define THP_NTP_NUM_SERVERS         4
 #define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST( \
     "ntp.aliyun.com", \

@@ -42,10 +42,11 @@ static uint8_t s_expect_mac[6];
 static uint8_t s_bindkey[16];
 static bool s_has_mac_filter;
 static bool s_has_bindkey;
-static bool s_scanning;
-static bool s_inited;
-static bool s_synced;
-static bool s_scan_wanted = true; /* HTTP 期间短暂 false，由任务续扫 */
+/* 跨任务读写（GAP 回调 / scan_sup / thp_cycle 上报路径） */
+static volatile bool s_scanning;
+static volatile bool s_inited;
+static volatile bool s_synced;
+static volatile bool s_scan_wanted = true; /* HTTP perform 期间短暂 false */
 static uint8_t s_own_addr_type;
 
 static int gap_on_event(struct ble_gap_event *event, void *arg);

@@ -7,6 +7,7 @@
 #include <lwip/netdb.h>
 #include <lwip/sockets.h>
 
+#include "atc_ble.h"
 #include "esp_crt_bundle.h"
 #include "esp_err.h"
 #include "esp_http_client.h"
@@ -27,7 +28,7 @@
 static const char *TAG = "thp.report";
 
 #ifndef THP_HTTP_TIMEOUT_MS
-#define THP_HTTP_TIMEOUT_MS 40000
+#define THP_HTTP_TIMEOUT_MS 15000
 #endif
 #ifndef THP_OFFLINE_FLUSH_GAP_MS
 #define THP_OFFLINE_FLUSH_GAP_MS 200
@@ -41,10 +42,19 @@ static const char *TAG = "thp.report";
 #ifndef THP_REPORT_RETRY_BASE_MS
 #define THP_REPORT_RETRY_BASE_MS 2000
 #endif
+/* probe_api DNS+connect 约 10+10s，剩余预算不足则跳过 */
+#define THP_PROBE_MIN_REMAIN_MS 20000
 
 #define HTTP_RECV_BUF 1024
 
 static SemaphoreHandle_t s_net_mtx;
+/** 本周期是否已做过 probe（每周期最多一次，且须有预算） */
+static bool s_probe_this_cycle;
+
+void thp_report_new_cycle(void)
+{
+    s_probe_this_cycle = false;
+}
 
 static const char *token_for_kind(thp_device_kind_t k)
 {
@@ -149,6 +159,22 @@ void thp_report_probe_api(void)
     close(sock);
 }
 
+static void maybe_probe_api(TickType_t deadline, bool backfill)
+{
+    if (backfill || s_probe_this_cycle) {
+        return;
+    }
+    int32_t remain = thp_deadline_remain_ms(deadline);
+    if (remain < THP_PROBE_MIN_REMAIN_MS) {
+        ESP_LOGW(TAG, "剩余预算 %dms < %dms，跳过 probe_api",
+                 (int)remain, THP_PROBE_MIN_REMAIN_MS);
+        s_probe_this_cycle = true; /* 本周期不再尝试 */
+        return;
+    }
+    s_probe_this_cycle = true;
+    thp_report_probe_api();
+}
+
 static bool json_append(char *buf, size_t cap, size_t *used, const char *fmt, ...)
 {
     if (buf == NULL || used == NULL || cap == 0 || *used >= cap) {
@@ -239,12 +265,18 @@ static thp_http_result_t classify_status(int status)
     return THP_HTTP_TRANSIENT;
 }
 
-static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int *out_status)
+static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
+                                     TickType_t deadline, int *out_status)
 {
     char url[256];
     char body[384];
     char auth[160];
     char resp[HTTP_RECV_BUF];
+
+    if (thp_deadline_reached(deadline)) {
+        *out_status = -1;
+        return THP_HTTP_TRANSIENT;
+    }
 
     size_t base_len = strlen(THP_API_BASE);
     const char *base = THP_API_BASE;
@@ -282,9 +314,10 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     cfg.cert_pem = NULL;
 #endif
 
-    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d kind=%s",
+    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d kind=%s remain=%dms",
              (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS,
-             (int)backfill, thp_kind_tag(r->kind));
+             (int)backfill, thp_kind_tag(r->kind),
+             (int)thp_deadline_remain_ms(deadline));
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
@@ -309,7 +342,11 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
         }
     }
 
+    /* C3 单射频：仅在 perform 期间停 BLE 扫描，避免与 TLS 抢空口 */
+    atc_ble_stop_scan();
     esp_err_t err = esp_http_client_perform(client);
+    atc_ble_start_scan();
+
     if (net_locked && s_net_mtx) {
         xSemaphoreGive(s_net_mtx);
         net_locked = false;
@@ -318,9 +355,7 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
         ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x)  heap=%u  body=%s",
                  esp_err_to_name(err), (unsigned)err,
                  (unsigned)esp_get_free_heap_size(), body);
-        if (!backfill) {
-            thp_report_probe_api();
-        }
+        maybe_probe_api(deadline, backfill);
         esp_http_client_cleanup(client);
         *out_status = -1;
         return THP_HTTP_TRANSIENT;
@@ -347,7 +382,8 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     return classify_status(status);
 }
 
-thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill, int max_retries)
+thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill,
+                                        int max_retries, TickType_t deadline)
 {
     if (max_retries < 0) {
         max_retries = 0;
@@ -357,9 +393,14 @@ thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill, i
             ESP_LOGW(TAG, "Wi-Fi 未连接，等待下一周期");
             return THP_HTTP_TRANSIENT;
         }
+        if (thp_deadline_reached(deadline)) {
+            ESP_LOGW(TAG, "周期 deadline 已到，停止上报 kind=%s attempt=%d",
+                     thp_kind_tag(r->kind), attempt);
+            return THP_HTTP_TRANSIENT;
+        }
 
         int status = 0;
-        thp_http_result_t res = report_once(r, backfill, &status);
+        thp_http_result_t res = report_once(r, backfill, deadline, &status);
         if (res == THP_HTTP_OK) {
             return THP_HTTP_OK;
         }
@@ -376,6 +417,11 @@ thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill, i
 
         if (attempt < max_retries) {
             uint32_t backoff = THP_REPORT_RETRY_BASE_MS * (1u << attempt);
+            if (thp_deadline_remain_ms(deadline) < (int32_t)backoff + 500) {
+                ESP_LOGW(TAG, "退避 %lums 将超出 deadline，停止重试 kind=%s",
+                         (unsigned long)backoff, thp_kind_tag(r->kind));
+                return THP_HTTP_TRANSIENT;
+            }
             ESP_LOGW(TAG, "上报暂态失败 (attempt=%d/%d status=%d)，%lums 后重试",
                      attempt + 1, max_retries, status,
                      (unsigned long)backoff);
@@ -389,18 +435,29 @@ thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill, i
     return THP_HTTP_TRANSIENT;
 }
 
-void thp_report_or_enqueue(const thp_reading_t *r)
+void thp_report_or_enqueue(const thp_reading_t *r, TickType_t deadline)
 {
     if (r == NULL) {
         return;
     }
-    thp_http_result_t res = thp_report_with_retry(r, false, THP_REPORT_MAX_RETRIES);
+    if (!thp_wifi_is_connected()) {
+        ESP_LOGW(TAG, "Wi-Fi 未连接，读数直接入离线队列 kind=%s", thp_kind_tag(r->kind));
+        thp_queue_push(r);
+        return;
+    }
+    if (thp_deadline_reached(deadline)) {
+        ESP_LOGW(TAG, "周期预算耗尽，读数直接入离线队列 kind=%s", thp_kind_tag(r->kind));
+        thp_queue_push(r);
+        return;
+    }
+
+    thp_http_result_t res = thp_report_with_retry(r, false, THP_REPORT_MAX_RETRIES, deadline);
     if (res == THP_HTTP_TRANSIENT) {
         thp_queue_push(r);
     }
 }
 
-void thp_report_flush_queue(int max_items)
+void thp_report_flush_queue(int max_items, TickType_t deadline)
 {
     if (max_items <= 0) {
         max_items = THP_OFFLINE_FLUSH_MAX_PER_CYCLE;
@@ -408,16 +465,25 @@ void thp_report_flush_queue(int max_items)
     if (!thp_wifi_is_connected()) {
         return;
     }
+    if (thp_deadline_reached(deadline)) {
+        ESP_LOGW(TAG, "补传跳过：周期 deadline 已到");
+        return;
+    }
     unsigned pending = thp_queue_count();
     if (pending == 0) {
         return;
     }
 
-    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d）",
-             pending, max_items);
+    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d，deadline 剩余 %dms）",
+             pending, max_items, (int)thp_deadline_remain_ms(deadline));
 
     int sent_this_cycle = 0;
     while (sent_this_cycle < max_items) {
+        if (thp_deadline_reached(deadline)) {
+            ESP_LOGW(TAG, "补传达到周期 deadline，剩余 %u 条下周期继续",
+                     thp_queue_count());
+            return;
+        }
         if (!thp_wifi_is_connected()) {
             ESP_LOGW(TAG, "补传中断：Wi-Fi 断开");
             return;
@@ -427,13 +493,13 @@ void thp_report_flush_queue(int max_items)
             break;
         }
 
-        thp_http_result_t res = thp_report_with_retry(&item, true, 0);
+        thp_http_result_t res = thp_report_with_retry(&item, true, 0, deadline);
         if (res == THP_HTTP_OK) {
             ESP_LOGI(TAG, "补传成功 kind=%s iso=%s",
                      thp_kind_tag(item.kind), item.has_iso ? item.iso : "(no-ts)");
             thp_queue_pop();
             sent_this_cycle++;
-            if (sent_this_cycle < max_items) {
+            if (sent_this_cycle < max_items && !thp_deadline_reached(deadline)) {
                 vTaskDelay(pdMS_TO_TICKS(THP_OFFLINE_FLUSH_GAP_MS));
             }
             continue;

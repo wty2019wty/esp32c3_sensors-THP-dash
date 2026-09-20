@@ -6,7 +6,26 @@
 #include <stdbool.h>
 #include <stdio.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #define ISO_UTC_BUF_LEN 32
+
+/** 绝对 tick deadline：已到/已过返回 true（tick 回绕安全） */
+static inline bool thp_deadline_reached(TickType_t deadline)
+{
+    return (int32_t)(xTaskGetTickCount() - deadline) >= 0;
+}
+
+/** 距 deadline 剩余毫秒；已到则为 0 */
+static inline int32_t thp_deadline_remain_ms(TickType_t deadline)
+{
+    TickType_t now = xTaskGetTickCount();
+    if ((int32_t)(now - deadline) >= 0) {
+        return 0;
+    }
+    return (int32_t)((deadline - now) * portTICK_PERIOD_MS);
+}
 
 typedef enum {
     THP_KIND_LOCAL = 0,
