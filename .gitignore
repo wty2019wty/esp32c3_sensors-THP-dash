@@ -25,6 +25,9 @@ dist/
 .node-corepack/
 .xdg-cache/
 
+# Python
+__pycache__/
+*.py[cod]
 
 
 # Wrangler
