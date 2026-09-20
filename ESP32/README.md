@@ -35,7 +35,7 @@ ESP32/
 ├── sdkconfig.defaults          # C3 / 4MB / TLS 证书捆绑包
 ├── main/
 │   ├── main.c                  # 仅 boot：NVS → 传感器/Wi-Fi/队列 → 启动调度
-│   ├── thp_sched.c/h           # 单周期流水线：校时→补传→LOCAL→MI→睡眠
+│   ├── thp_sched.c/h           # 单周期流水线：校时→LOCAL→等窗→MI→补传→睡眠
 │   ├── thp_wifi.c/h            # Wi-Fi STA（断线持续重连）
 │   ├── thp_time.c/h            # SNTP + ISO-8601
 │   ├── thp_sensors.c/h         # I2C + SHT40/BMP280 采样
@@ -55,15 +55,22 @@ ESP32/
 
 ### 调度模型
 
-单 FreeRTOS 任务 `thp_cycle`，每 `THP_REPORT_PERIOD_MS` 跑一轮固定阶段：
+单 FreeRTOS 任务 `thp_cycle`，每 `THP_REPORT_PERIOD_MS` 跑一轮固定阶段。BLE 窗口：周期起点 **T 前 5s 开扫，T+10s 关窗**；MI 取窗口内距 T 最近一帧。
 
-1. **校时** — Wi-Fi 可用时 `esp_netif_sntp_start` + 等待同步  
-2. **补传** — 最多 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE` 条历史  
-3. **LOCAL** — I2C 采样 → Token A 上报；失败入离线队列  
-4. **MI**（若就绪）— 取本周期 BLE 最近一帧 → Token B 上报  
-5. **睡眠** — 相对本周期起点补齐剩余时间，超时则立刻进入下一周期  
+| 阶段 | 时刻 | 行为 |
+| --- | --- | --- |
+| 0. 开 BLE 窗 | T−5s | `thp_mi_scan_window_open`（仅窗口内扫描，默认不持续扫） |
+| 1. 校时 | T | Wi-Fi 可用时 SNTP；已同步则短路，每 `THP_NTP_RESYNC_EVERY_CYCLES` 个周期才真正重同步 |
+| 2. LOCAL | T | I2C 采样 → Token A 上报或入离线队列 |
+| 3. 等窗 + MI | T+10s | 等到关窗 → 取距 T 最近帧 → Token B 上报或入队；关 BLE 窗 |
+| 4. 补传 | MI 之后 | 最多 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE` 条历史；剩余预算 &lt; 10s 则跳过 |
+| 5. 睡眠 | — | 睡到下一周期 T′−5s；本周期超时则立刻开下一窗 |
 
-不再使用 LOCAL/MI 两条独立任务；TLS 与队列在单线程周期内串行，无跨任务抢锁。
+顺序设计意图：**当前周期读数优先上报**（看板时效），离线积压放在 LOCAL/MI 之后补传，不抢占本周期新鲜数据。
+
+deadline = `cycle_start + period − THP_CYCLE_DEADLINE_MARGIN_MS`（默认 margin 20s）。耗尽时不再发起 HTTP，读数仍入队。
+
+不再使用 LOCAL/MI 两条独立任务；TLS 与队列在单线程周期内串行，无跨任务抢锁。HTTP `perform` 期间短暂停 BLE 扫描（C3 单射频共存），结束后若仍在窗口内则恢复。
 
 ## 3. 配置
 
@@ -143,7 +150,7 @@ Content-Type: application/json
 | 字段范围 | 与服务端一致：T −40~85，H 0~100，P 300~1200；超范围字段**不写入本帧**，其余字段仍可上报 |
 | 失败重试 | 网络/5xx：最多 3 次指数退避；**401/403/400 不重试** |
 | 传感器热修复 | `present=false` 时上报任务仍启动，每周期尝试重新 init；成功后恢复对应字段 |
-| 离线队列 | 暂态失败（含 Wi-Fi 断开）入 RAM 环形队列；恢复后**先补传再报当前**；容量 `THP_OFFLINE_QUEUE_LEN`（默认 288≈1 天），满则丢最旧；**每周期最多补 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE`（默认 24）条**，避免长时间阻塞当前采样；**断电不保留**；无有效 UTC 戳的条目补传时不带 `ts` |
+| 离线队列 | 暂态失败（含 Wi-Fi 断开）入 RAM 环形队列；**当前周期 LOCAL/MI 优先上报，补传在两者之后**（非「先补传再报当前」）；容量 `THP_OFFLINE_QUEUE_LEN`（默认 288≈1 天），满则丢最旧；**每周期最多补 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE`（默认 24）条**，且 deadline 剩余不足时跳过，避免挤占下一周期；**断电不保留**；无有效 UTC 戳的条目补传时不带 `ts` |
 
 ## 7. 串口日志要点
 

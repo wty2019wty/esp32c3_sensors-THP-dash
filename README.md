@@ -347,7 +347,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - CORS：默认仅同源；跨域 Dash 用环境变量 `ALLOWED_ORIGINS`（逗号分隔完整 origin）  
 - 长范围查询/导出在 **SQL 侧** 自动降采样（失败时回退内存聚合）  
 
-## ESP32-C3 固件（已交付，本机已构建）
+## ESP32-C3 固件
 
 固件工程在 [`ESP32/`](./ESP32/)，说明见 [ESP32/README.md](./ESP32/README.md)。
 
