@@ -11,21 +11,46 @@ export function jsonError(message, status = 400, extra = {}) {
   return json({ error: message, ...extra }, status);
 }
 
-export function corsHeaders(req) {
+/**
+ * CORS: same-origin by default. Never reflect arbitrary origins with credentials.
+ * Split-host Dash: set env.ALLOWED_ORIGINS to a comma-separated origin list.
+ */
+export function corsHeaders(req, env) {
+  const url = new URL(req.url);
   const origin = req.headers.get('origin') || '';
-  // Same-origin Pages + Worker; allow configured origin later if split hosts.
-  return {
-    'access-control-allow-origin': origin || '*',
-    'access-control-allow-credentials': 'true',
+  const headers = {
     'access-control-allow-headers': 'content-type, authorization, x-csrf-token',
     'access-control-allow-methods': 'GET,POST,DELETE,OPTIONS',
     vary: 'origin',
   };
+
+  if (!origin) return headers;
+
+  let originHost = '';
+  try {
+    originHost = new URL(origin).host;
+  } catch {
+    return headers;
+  }
+
+  const allowList = String(env?.ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const allowed =
+    (originHost && originHost === url.host) || allowList.includes(origin);
+
+  if (allowed) {
+    headers['access-control-allow-origin'] = origin;
+    headers['access-control-allow-credentials'] = 'true';
+  }
+  return headers;
 }
 
-export function withCors(req, res) {
+export function withCors(req, res, env) {
   const headers = new Headers(res.headers);
-  const cors = corsHeaders(req);
+  const cors = corsHeaders(req, env);
   for (const [k, v] of Object.entries(cors)) headers.set(k, v);
   return new Response(res.body, {
     status: res.status,

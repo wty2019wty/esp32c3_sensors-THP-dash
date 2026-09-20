@@ -106,7 +106,7 @@ Content-Type: application/json
 |------|------|------|
 | GET | `/api/health` | 无（存活探测） |
 | GET/POST | `/api/auth/bootstrap` | 无（仅库内无用户时可创建） |
-| POST | `/api/auth/migrate` | 无（幂等建表，本地调试用） |
+| POST | `/api/auth/migrate` | 库内无用户时开放；已有用户需 **admin + CSRF** |
 | POST | `/api/auth/login` | 无 |
 | POST | `/api/auth/logout` | 会话 + CSRF |
 | GET | `/api/auth/me` | 会话 |
@@ -325,8 +325,11 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - 密码：PBKDF2-SHA256（迭代 210000）  
 - 设备 Token / 会话：只存 SHA-256 哈希  
 - 会话 Cookie：HttpOnly + Secure + SameSite=Lax  
-- 登录失败限速（Cache API，尽力而为）  
+- 会话 **滑动续期** 14 天（每次鉴权延长 `expires_at`）  
+- 登录失败限速（Cache API，窗口 15 分钟，尽力而为）  
 - Token 明文仅生成响应中出现一次  
+- CORS：默认仅同源；跨域 Dash 用环境变量 `ALLOWED_ORIGINS`（逗号分隔完整 origin）  
+- 长范围查询/导出在 **SQL 侧** 自动降采样（失败时回退内存聚合）  
 
 ## ESP32-C3（待做）
 

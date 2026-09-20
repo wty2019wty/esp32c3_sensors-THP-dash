@@ -12,6 +12,55 @@ import {
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
 
+/** Escape for HTML text / attribute contexts (device names, token labels, etc.) */
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+/** Product display timezone — must match Worker default (REQUIREMENTS / Asia/Shanghai). */
+const DISPLAY_TZ = 'Asia/Shanghai';
+
+/** Local calendar-day start in a named IANA timezone (UTC instant). */
+function dayStartInTz(timeZone, now = new Date()) {
+  const fmt = new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(fmt.formatToParts(now).map((p) => [p.type, p.value]));
+  const hour = parts.hour === '24' ? '0' : parts.hour;
+  const probe = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(hour),
+    Number(parts.minute),
+    Number(parts.second)
+  );
+  const trueNow = now.getTime();
+  const offsetMs = probe - trueNow;
+  const midnightWall = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    0,
+    0,
+    0,
+    0
+  );
+  return new Date(midnightWall - offsetMs);
+}
+
 function isCoarsePointer() {
   return (
     matchMedia('(hover: none) and (pointer: coarse)').matches ||
@@ -140,14 +189,12 @@ function toast(msg, isError = false) {
 
 function rangeToFromTo() {
   const now = new Date();
-  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Asia/Shanghai';
   if (state.range === 'custom' && state.from && state.to) {
     return { from: state.from, to: state.to };
   }
   if (state.range === 'today') {
-    // local calendar day start
-    const start = new Date(now);
-    start.setHours(0, 0, 0, 0);
+    // Product timezone (same as Worker default), not browser local
+    const start = dayStartInTz(DISPLAY_TZ, now);
     return { from: start.toISOString(), to: now.toISOString() };
   }
   const hours = {
@@ -299,7 +346,7 @@ function setStats(device) {
   const online = device?.online;
   const seen = device?.lastSeenAt || latest?.ts;
   $('#stat-seen').innerHTML = seen
-    ? `最近上报 <time title="${seen}">${fmtTime(seen)}</time> · <span class="${online ? 'ok' : 'bad'}">${online ? '在线' : '离线/未知'}</span>`
+    ? `最近上报 <time title="${escapeHtml(seen)}">${escapeHtml(fmtTime(seen))}</time> · <span class="${online ? 'ok' : 'bad'}">${online ? '在线' : '离线/未知'}</span>`
     : '尚无上报';
 }
 
@@ -392,12 +439,17 @@ function renderDeviceTable() {
   tbody.innerHTML = '';
   for (const d of state.devices) {
     const tr = document.createElement('tr');
+    const id = escapeHtml(d.id);
+    const name = escapeHtml(d.name || '');
+    const status = escapeHtml(d.status || '');
+    const seen = escapeHtml(fmtTime(d.lastSeenAt));
+    const badgeClass = d.status === 'active' ? 'ok' : 'mute';
     tr.innerHTML = `
-      <td>${d.id}</td>
-      <td>${d.name || ''}</td>
-      <td><span class="badge ${d.status === 'active' ? 'ok' : 'mute'}">${d.status}</span></td>
-      <td>${fmtTime(d.lastSeenAt)}</td>
-      <td><button type="button" class="btn danger" data-del-device="${d.id}">删除</button></td>
+      <td>${id}</td>
+      <td>${name}</td>
+      <td><span class="badge ${badgeClass}">${status}</span></td>
+      <td>${seen}</td>
+      <td><button type="button" class="btn danger" data-del-device="${id}">删除</button></td>
     `;
     tbody.appendChild(tr);
   }
@@ -410,16 +462,17 @@ async function refreshTokens() {
   for (const t of data.tokens || []) {
     const tr = document.createElement('tr');
     const badge = t.status === 'active' ? 'ok' : 'mute';
+    const id = escapeHtml(t.id);
     const actions =
       t.status === 'active'
-        ? `<button type="button" class="btn danger" data-revoke-token="${t.id}">吊销</button>`
-        : `<button type="button" class="btn danger" data-purge-token="${t.id}">删除</button>`;
+        ? `<button type="button" class="btn danger" data-revoke-token="${id}">吊销</button>`
+        : `<button type="button" class="btn danger" data-purge-token="${id}">删除</button>`;
     tr.innerHTML = `
-      <td>${t.id}</td>
-      <td>${t.deviceName || t.deviceId}</td>
-      <td>${t.name || '—'}</td>
-      <td><span class="badge ${badge}">${t.status}</span></td>
-      <td>${fmtTime(t.lastUsedAt)}</td>
+      <td>${id}</td>
+      <td>${escapeHtml(t.deviceName || t.deviceId || '')}</td>
+      <td>${escapeHtml(t.name || '—')}</td>
+      <td><span class="badge ${badge}">${escapeHtml(t.status || '')}</span></td>
+      <td>${escapeHtml(fmtTime(t.lastUsedAt))}</td>
       <td>${actions}</td>
     `;
     tbody.appendChild(tr);
@@ -431,7 +484,7 @@ async function refreshAdmin() {
   state.devices = data.devices || [];
   fillDeviceSelect();
   renderDeviceTable();
-  if (state.user?.role === 'admin' || state.user) {
+  if (state.user?.role === 'admin') {
     try {
       await refreshTokens();
     } catch {
@@ -678,6 +731,7 @@ $('#btn-new-device')?.addEventListener('click', () => {
 });
 
 $('#form-device')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
   const fd = new FormData(e.target);
   const errEl = $('#device-error');
   errEl.hidden = true;
@@ -687,6 +741,7 @@ $('#form-device')?.addEventListener('submit', async (e) => {
       name: String(fd.get('name') || '').trim(),
     });
     $('#dlg-device').close();
+    e.target.reset();
     await refreshAdmin();
     toast('设备已创建');
   } catch (err) {
@@ -702,6 +757,7 @@ $('#btn-new-token')?.addEventListener('click', () => {
 });
 
 $('#form-token')?.addEventListener('submit', async (e) => {
+  e.preventDefault();
   const fd = new FormData(e.target);
   const errEl = $('#token-error');
   errEl.hidden = true;
@@ -711,6 +767,7 @@ $('#form-token')?.addEventListener('submit', async (e) => {
       name: String(fd.get('name') || '').trim(),
     });
     $('#dlg-token').close();
+    e.target.reset();
     $('#secret-value').textContent = res.secret || '';
     $('#dlg-secret').showModal();
     await refreshAdmin();

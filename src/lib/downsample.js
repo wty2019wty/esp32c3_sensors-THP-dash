@@ -82,3 +82,40 @@ export function round3(n) {
 export function round2(n) {
   return Math.round(n * 100) / 100;
 }
+
+/**
+ * SQL expression that floors an ISO timestamp column to bucket start (UTC).
+ * Assumes stored ts format: YYYY-MM-DDTHH:MM:SS[.sss]Z
+ * @param {number} seconds bucket size in seconds
+ * @param {string} col column name
+ */
+export function sqlBucketStartExpr(seconds, col = 'ts') {
+  const s = Number(seconds) || 0;
+  if (s <= 0) return col;
+  const c = col;
+  const hourExpr = `CAST(substr(${c}, 12, 2) AS INTEGER)`;
+  const minuteExpr = `CAST(substr(${c}, 15, 2) AS INTEGER)`;
+  // substr(ts,1,11) = 'YYYY-MM-DDT'  — hour follows, then ':00:00.000Z'
+  // substr(ts,1,14) = 'YYYY-MM-DDTHH:' — minute follows, then ':00.000Z'
+  const dateT = `substr(${c}, 1, 11)`;
+  const dateHourColon = `substr(${c}, 1, 14)`;
+
+  if (s === 30 * 60) {
+    return `printf('%s%02d:00.000Z', ${dateHourColon}, CASE WHEN ${minuteExpr} < 30 THEN 0 ELSE 30 END)`;
+  }
+  if (s === 3600) {
+    return `printf('%s%02d:00:00.000Z', ${dateT}, ${hourExpr})`;
+  }
+  if (s === 2 * 3600) {
+    return `printf('%s%02d:00:00.000Z', ${dateT}, ${hourExpr} / 2 * 2)`;
+  }
+  if (s === 6 * 3600) {
+    return `printf('%s%02d:00:00.000Z', ${dateT}, ${hourExpr} / 6 * 6)`;
+  }
+  if (s === 86400) {
+    return `substr(${c}, 1, 10) || 'T00:00:00.000Z'`;
+  }
+  // Week / generic: floor epoch seconds to bucket boundary
+  const epoch = `CAST(strftime('%s', substr(${c}, 1, 19)) AS INTEGER)`;
+  return `strftime('%Y-%m-%dT%H:%M:%S.000Z', ${epoch} / ${s} * ${s}, 'unixepoch')`;
+}

@@ -10,7 +10,12 @@ import {
   localDayStartIso,
 } from '../lib/http.js';
 import { requireSessionAction } from './auth.js';
-import { pickGranularity, aggregateRows, round3 } from '../lib/downsample.js';
+import {
+  pickGranularity,
+  aggregateRows,
+  round3,
+  sqlBucketStartExpr,
+} from '../lib/downsample.js';
 
 function resolveDisplayTz(env) {
   return env.TZ_DISPLAY || env.DISPLAY_TZ || 'Asia/Shanghai';
@@ -107,29 +112,76 @@ export async function ingestReading(env, req) {
   return json({ ok: true, deviceId: device.device_id, ts }, 201);
 }
 
-async function loadSeries(env, deviceId, fromIso, toIso) {
+/**
+ * Load series for charts/CSV. Downsample in SQL when gran.sql is set;
+ * fall back to JS aggregation if the D1 SQL dialect rejects the expression.
+ */
+export async function loadSeries(env, deviceId, fromIso, toIso) {
   const fromMs = Date.parse(fromIso);
   const toMs = Date.parse(toIso);
   const gran = pickGranularity(fromMs, toMs);
 
-  const { results } = await env.DB.prepare(
-    `SELECT ts, temperature, humidity, pressure
+  const rawSelect = `SELECT ts, temperature, humidity, pressure
      FROM readings
      WHERE device_id = ? AND ts >= ? AND ts <= ?
-     ORDER BY ts ASC`
-  )
-    .bind(deviceId, fromIso, toIso)
-    .all();
+     ORDER BY ts ASC`;
 
-  const rows = (results || []).map((r) => ({
-    ts: r.ts,
-    temperature: r.temperature,
-    humidity: r.humidity,
-    pressure: r.pressure,
-  }));
+  const mapRaw = (results) =>
+    (results || []).map((r) => ({
+      ts: r.ts,
+      temperature: r.temperature,
+      humidity: r.humidity,
+      pressure: r.pressure,
+    }));
 
-  const points = gran.sql ? aggregateRows(rows, gran.seconds) : rows;
-  return { gran, points, rawCount: rows.length };
+  if (!gran.sql) {
+    const { results } = await env.DB.prepare(rawSelect)
+      .bind(deviceId, fromIso, toIso)
+      .all();
+    const points = mapRaw(results);
+    return { gran, points, rawCount: points.length };
+  }
+
+  const bucketExpr = sqlBucketStartExpr(gran.seconds);
+  // GROUP BY 1 — do not GROUP BY ts (SQLite prefers the base column over the alias)
+  const aggSql = `SELECT ${bucketExpr} AS ts,
+            AVG(temperature) AS temperature,
+            AVG(humidity) AS humidity,
+            AVG(pressure) AS pressure
+     FROM readings
+     WHERE device_id = ? AND ts >= ? AND ts <= ?
+     GROUP BY 1
+     ORDER BY 1`;
+
+  let points;
+  let rawCount = 0;
+  try {
+    const [{ results }, countRow] = await Promise.all([
+      env.DB.prepare(aggSql).bind(deviceId, fromIso, toIso).all(),
+      env.DB.prepare(
+        `SELECT COUNT(*) AS c FROM readings WHERE device_id = ? AND ts >= ? AND ts <= ?`
+      )
+        .bind(deviceId, fromIso, toIso)
+        .first(),
+    ]);
+    rawCount = Number(countRow?.c || 0);
+    points = (results || []).map((r) => ({
+      ts: r.ts,
+      temperature: round3(r.temperature),
+      humidity: round3(r.humidity),
+      pressure: round3(r.pressure),
+    }));
+  } catch (err) {
+    console.warn('sql_downsample_failed', err);
+    const { results } = await env.DB.prepare(rawSelect)
+      .bind(deviceId, fromIso, toIso)
+      .all();
+    const rows = mapRaw(results);
+    rawCount = rows.length;
+    points = aggregateRows(rows, gran.seconds);
+  }
+
+  return { gran, points, rawCount };
 }
 
 export async function queryReadings(env, req) {

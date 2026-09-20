@@ -83,8 +83,11 @@ export async function resolveUserSession(env, req) {
     await env.DB.prepare(`DELETE FROM sessions WHERE id = ?`).bind(row.session_id).run();
     return null;
   }
-  await env.DB.prepare(`UPDATE sessions SET last_used_at = ? WHERE id = ?`)
-    .bind(nowIso(), row.session_id)
+  // Sliding session: every successful auth extends expires_at by SESSION_DAYS
+  const now = new Date();
+  const newExpires = addDaysIso(SESSION_DAYS, now);
+  await env.DB.prepare(`UPDATE sessions SET last_used_at = ?, expires_at = ? WHERE id = ?`)
+    .bind(now.toISOString(), newExpires, row.session_id)
     .run();
   return {
     sessionId: row.session_id,
@@ -92,6 +95,7 @@ export async function resolveUserSession(env, req) {
     username: row.username,
     role: row.role,
     csrfHash: row.csrf_hash,
+    expiresAt: newExpires,
   };
 }
 
@@ -151,36 +155,54 @@ export async function findUserByUsername(env, username) {
     .first();
 }
 
-export { verifyPassword };
+export { verifyPassword, hashPassword };
+
+/** Login failure window (seconds). Cache API needs max-age to actually store. */
+export const LOGIN_RATE_LIMIT_WINDOW_S = 900;
+export const LOGIN_RATE_LIMIT_MAX = 8;
+
+function loginRateKey(req) {
+  const ip = req.headers.get('cf-connecting-ip') || 'unknown';
+  return new Request(`https://thp-ratelimit.local/login/${ip}`);
+}
 
 /**
  * Simple in-Workers login throttle via Cache API (best-effort).
+ * Response MUST carry Cache-Control max-age or Workers Cache will not persist it.
  */
 export async function loginRateLimited(req) {
-  const url = new URL(req.url);
-  const ip = req.headers.get('cf-connecting-ip') || 'unknown';
-  const key = new Request(`https://thp-ratelimit.local/login/${ip}`);
+  const key = loginRateKey(req);
   const cache = caches.default;
   try {
     const hit = await cache.match(key);
     if (!hit) return false;
+    const expiresAt = Number(hit.headers.get('x-expires-at') || 0);
+    if (expiresAt && Date.now() > expiresAt) {
+      await cache.delete(key).catch(() => {});
+      return false;
+    }
     const count = Number(hit.headers.get('x-count') || 0);
-    return count >= 8;
+    return count >= LOGIN_RATE_LIMIT_MAX;
   } catch {
     return false;
   }
 }
 
 export async function recordLoginFailure(req) {
-  const url = new URL(req.url);
-  const ip = req.headers.get('cf-connecting-ip') || 'unknown';
-  const key = new Request(`https://thp-ratelimit.local/login/${ip}`);
+  const key = loginRateKey(req);
   const cache = caches.default;
   try {
     const hit = await cache.match(key);
-    const count = hit ? Number(hit.headers.get('x-count') || 0) + 1 : 1;
+    const now = Date.now();
+    const expiresAt = Number(hit?.headers.get('x-expires-at') || 0);
+    const expired = !hit || (expiresAt && now > expiresAt);
+    const count = expired ? 1 : Number(hit.headers.get('x-count') || 0) + 1;
     const res = new Response(null, { status: 200 });
     res.headers.set('x-count', String(count));
+    const ttl = LOGIN_RATE_LIMIT_WINDOW_S;
+    res.headers.set('x-expires-at', String(now + ttl * 1000));
+    // Workers Cache API requires max-age/s-maxage to store the entry
+    res.headers.set('Cache-Control', `public, max-age=${ttl}`);
     await cache.put(key, res.clone());
   } catch {
     // rate limit is best-effort

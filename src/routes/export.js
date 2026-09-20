@@ -6,8 +6,9 @@ import {
   localDayStartIso,
 } from '../lib/http.js';
 import { requireSessionAction } from './auth.js';
-import { pickGranularity, aggregateRows, MAX_EXPORT_ROWS } from '../lib/downsample.js';
+import { MAX_EXPORT_ROWS } from '../lib/downsample.js';
 import { readingsToCsv, exportFilename, csvResponse } from '../lib/csv.js';
+import { loadSeries } from './readings.js';
 
 function resolveDisplayTz(env) {
   return env.TZ_DISPLAY || env.DISPLAY_TZ || 'Asia/Shanghai';
@@ -37,24 +38,7 @@ export async function exportCsv(env, req) {
       .first();
     if (!device) return jsonError('设备不存在', 404);
 
-    const { results } = await env.DB.prepare(
-      `SELECT ts, temperature, humidity, pressure
-       FROM readings
-       WHERE device_id = ? AND ts >= ? AND ts <= ?
-       ORDER BY ts ASC`
-    )
-      .bind(deviceId, from, to)
-      .all();
-
-    const rows = (results || []).map((r) => ({
-      ts: r.ts,
-      temperature: r.temperature,
-      humidity: r.humidity,
-      pressure: r.pressure,
-    }));
-
-    const gran = pickGranularity(Date.parse(from), Date.parse(to));
-    const points = gran.sql ? aggregateRows(rows, gran.seconds) : rows;
+    const { gran, points, rawCount } = await loadSeries(env, deviceId, from, to);
 
     if (points.length > MAX_EXPORT_ROWS) {
       return jsonError(
@@ -63,7 +47,7 @@ export async function exportCsv(env, req) {
         { limit: MAX_EXPORT_ROWS, pointCount: points.length }
       );
     }
-    if (rows.length > 0 && points.length === 0) {
+    if (rawCount > 0 && points.length === 0) {
       return jsonError('所选范围内没有数据', 404);
     }
 
@@ -73,7 +57,7 @@ export async function exportCsv(env, req) {
     res.headers.set('x-thp-granularity', gran.id);
     res.headers.set('x-thp-granularity-label', encodeURIComponent(gran.label));
     res.headers.set('x-thp-point-count', String(points.length));
-    res.headers.set('x-thp-raw-count', String(rows.length));
+    res.headers.set('x-thp-raw-count', String(rawCount));
     return res;
   });
 }

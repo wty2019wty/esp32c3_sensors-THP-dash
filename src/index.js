@@ -20,7 +20,7 @@ export default {
     const method = req.method.toUpperCase();
 
     if (method === 'OPTIONS') {
-      return withCors(req, new Response(null, { status: 204 }));
+      return withCors(req, new Response(null, { status: 204 }), env);
     }
 
     let res;
@@ -41,7 +41,7 @@ export default {
     }
 
     if (path.startsWith('/api/')) {
-      return withCors(req, res);
+      return withCors(req, res, env);
     }
     return res;
   },
@@ -56,7 +56,7 @@ async function handle(req, env, path, method, url) {
     return authRoutes.bootstrapCreate(env, req);
   }
   if (path === '/api/auth/migrate' && method === 'POST') {
-    return authRoutes.migrate(env);
+    return authRoutes.migrate(env, req);
   }
   if (path === '/api/auth/login' && method === 'POST') {
     return authRoutes.login(env, req);
