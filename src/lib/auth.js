@@ -14,7 +14,7 @@ import { ensureSchemaAndCountUsers, isMissingTableError } from './schema.js';
 
 export const SESSION_COOKIE = 'thp_session';
 export const CSRF_COOKIE = 'thp_csrf';
-export const SESSION_DAYS = 14;
+export const SESSION_DAYS = 1;
 const SESSION_MAX_AGE = SESSION_DAYS * 24 * 3600;
 
 export async function createSession(env, userId) {
