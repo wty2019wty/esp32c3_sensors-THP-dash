@@ -116,11 +116,38 @@ Content-Type: application/json
 | --- | --- |
 | `Wi-Fi STA max TX power = 15 dBm` | 已按配置限制发射功率（天线差的 Super Mini 用） |
 | `Wi-Fi 已连接，IP=...` | STA 就绪 |
+| `探测 https://... heap_free=...` | 连通性预检开始 |
+| `DNS host -> IPv4 a.b.c.d:443` | 解析成功（只查 A 记录） |
+| `TCP connect ... OK` | 网络可达；若仍 HTTPS 失败则是 TLS/证书 |
+| `TCP connect ... 失败 errno=...` | 路由/防火墙/域名/运营商问题 |
 | `SNTP 时间已同步` | 将发送 `measured_at` |
 | `SHT40/BMP280 初始化成功` | 传感器在位 |
 | `上报 HTTP 201` + `ok: true` | 已写入 D1 |
+| `HTTP 请求失败: ESP_ERR_HTTP_CONNECT` | TCP/TLS 未建立（见下方排查） |
 | `Token 无效或已吊销` | Dash 重新生成 Token 并改配置重烧 |
-| `THP_API_BASE` | 检查是否可达（本地 dev 须用局域网 IP） |
+
+### HTTPS 连不上（ESP_ERR_HTTP_CONNECT）排查
+
+现象类似：
+
+```text
+esp-tls: Failed to open new connection in specified timeout
+transport_base: Failed to open a new connection
+HTTP_CLIENT: Connection failed, sock < 0
+```
+
+
+
+| 步骤 | 动作 |
+| --- | --- |
+| 1 | 确认 `THP_API_BASE` 是 **https://域名**（不要 `127.0.0.1`，ESP32 上那是指它自己） |
+| 2 | 工程已默认 `CONFIG_LWIP_IPV6=n`：Cloudflare 有 AAAA，家用宽带 IPv6 不通时 lwIP 会连挂超时 |
+| 3 | 看串口预检：`DNS -> IPv4` 成功且 `TCP connect OK` 仍失败 → TLS/证书；DNS/TCP 失败 → 路由/运营商 |
+| 4 | 若日志为 `No matching trusted root certificate found` + `-0x3000`：Cloudflare 给的是 **Google Trust Services** 证书（GTS Root R4）。固件已在 `main/thp_tls_trust.h` **内嵌该根证书**（`cert_pem`），并开启 `CROSS_SIGNED_VERIFY`。换域名/换 CA 时请更新该头文件 |
+| 5 | `THP_HTTP_TIMEOUT_MS` 默认 40000；CMCC + Cloudflare 偶尔极慢，可再调到 60000 |
+| 6 | `heap_free` 很低（&lt;80KB）时 TLS 可能起不来：确认未再链 OLED/IMU 等大组件 |
+| 7 | 仍不行：临时把 `THP_API_BASE` 改成 `http://<电脑局域网IP>:8787` 验证上报链路（本地 `npm run dev`） |
+| 8 | 极端情况：路由器/运营商对 Cloudflare 不友好，可改用 `*.workers.dev` 或给设备走可出境的网络 |
 
 ## 8. 与参考工程的关系
 

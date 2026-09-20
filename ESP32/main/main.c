@@ -16,6 +16,9 @@
 #include <time.h>
 #include <sys/time.h>
 
+#include <lwip/netdb.h>
+#include <lwip/sockets.h>
+
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
 #include "esp_crt_bundle.h"
@@ -38,6 +41,7 @@
 #include "i2c_config.h"
 #include "sht40.h"
 #include "thp_config.h"
+#include "thp_tls_trust.h"
 
 static const char *TAG = "thp";
 
@@ -49,7 +53,9 @@ static const char *TAG = "thp";
 #define WIFI_MAX_RETRY      8
 #define I2C_GLITCH_IGNORE_CNT 7
 #define I2C_TIMEOUT_MS      100
-#define HTTP_TIMEOUT_MS     20000
+#ifndef THP_HTTP_TIMEOUT_MS
+#define THP_HTTP_TIMEOUT_MS 40000
+#endif
 #define HTTP_RECV_BUF       1024
 
 static EventGroupHandle_t s_wifi_events;
@@ -349,6 +355,94 @@ typedef enum {
     THP_HTTP_TRANSIENT,     /* 网络/5xx：有限重试 */
 } thp_http_result_t;
 
+/** 从 THP_API_BASE 提取 host[:port] 与 path 前的 scheme */
+static bool split_api_base(char *host, size_t host_n, uint16_t *port, bool *is_https)
+{
+    const char *base = THP_API_BASE;
+    if (strncmp(base, "https://", 8) == 0) {
+        *is_https = true;
+        base += 8;
+        *port = 443;
+    } else if (strncmp(base, "http://", 7) == 0) {
+        *is_https = false;
+        base += 7;
+        *port = 80;
+    } else {
+        return false;
+    }
+    size_t i = 0;
+    while (base[i] && base[i] != '/' && base[i] != ':' && i + 1 < host_n) {
+        host[i] = base[i];
+        i++;
+    }
+    host[i] = '\0';
+    if (base[i] == ':') {
+        long p = strtol(&base[i + 1], NULL, 10);
+        if (p > 0 && p < 65536) {
+            *port = (uint16_t)p;
+        }
+    }
+    return host[0] != '\0';
+}
+
+/**
+ * @brief 预检：解析 IPv4 + TCP connect，区分 DNS/路由/TLS 问题
+ */
+static void probe_api_endpoint(void)
+{
+    char host[64];
+    uint16_t port = 443;
+    bool is_https = false;
+    if (!split_api_base(host, sizeof(host), &port, &is_https)) {
+        ESP_LOGE(TAG, "THP_API_BASE 非法: %s", THP_API_BASE);
+        return;
+    }
+
+    ESP_LOGI(TAG, "探测 %s  heap_free=%u", THP_API_BASE, (unsigned)esp_get_free_heap_size());
+
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;          /* 强制 IPv4，避开 AAAA 黑洞 */
+    hints.ai_socktype = SOCK_STREAM;
+    char port_str[8];
+    snprintf(port_str, sizeof(port_str), "%u", (unsigned)port);
+
+    struct addrinfo *res = NULL;
+    int gai = getaddrinfo(host, port_str, &hints, &res);
+    if (gai != 0 || res == NULL) {
+        ESP_LOGE(TAG, "DNS 解析失败 host=%s gai=%d（检查路由器 DNS / 域名）", host, gai);
+        return;
+    }
+
+    char ipstr[IPADDR_STRLEN_MAX] = {0};
+    const struct sockaddr_in *sin = (const struct sockaddr_in *)res->ai_addr;
+    inet_ntop(AF_INET, &sin->sin_addr, ipstr, sizeof(ipstr));
+    ESP_LOGI(TAG, "DNS %s -> IPv4 %s:%u", host, ipstr, (unsigned)port);
+
+    int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (sock < 0) {
+        ESP_LOGE(TAG, "socket() 失败 errno=%d", errno);
+        freeaddrinfo(res);
+        return;
+    }
+
+    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    int cr = connect(sock, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    if (cr != 0) {
+        ESP_LOGE(TAG, "TCP connect %s:%u 失败 errno=%d（多半是 IPv6/路由/防火墙/被墙）",
+                 ipstr, (unsigned)port, errno);
+        close(sock);
+        return;
+    }
+    ESP_LOGI(TAG, "TCP connect %s:%u OK（若 HTTPS 仍失败，问题在 TLS/证书/运营商）",
+             ipstr, (unsigned)port);
+    close(sock);
+}
+
 static void build_json(const thp_sample_t *s, char *buf, size_t n)
 {
     char iso[ISO_UTC_BUF_LEN];
@@ -421,34 +515,47 @@ static thp_http_result_t report_once(const thp_sample_t *s, int *out_status)
     esp_http_client_config_t cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
-        .timeout_ms = HTTP_TIMEOUT_MS,
+        .timeout_ms = THP_HTTP_TIMEOUT_MS,
         .user_agent = "esp32c3-thp-report/1.0",
         .buffer_size = 1024,
         .buffer_size_tx = 1024,
+        .disable_auto_redirect = true,
+#if !THP_HTTP_SKIP_VERIFY
+        /* Cloudflare/GTS：捆绑包匹配失败时，用内嵌 GTS Root R4 作为信任根
+         * （同时保留 bundle，便于其它公网 CA；IDF 会同时解析两者） */
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .cert_pem = THP_TLS_ROOT_PEM,
+#endif
     };
 
 #if THP_HTTP_SKIP_VERIFY
     cfg.skip_cert_common_name_check = true;
-#else
-    if (strncmp(url, "https://", 8) == 0) {
-        cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    }
+    cfg.crt_bundle_attach = NULL;
+    cfg.cert_pem = NULL;
 #endif
+
+    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms",
+             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS);
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
-        ESP_LOGE(TAG, "HTTP 客户端初始化失败");
+        ESP_LOGE(TAG, "HTTP 客户端初始化失败 heap=%u", (unsigned)esp_get_free_heap_size());
         *out_status = -1;
         return THP_HTTP_TRANSIENT;
     }
 
     esp_http_client_set_header(client, "Content-Type", "application/json");
     esp_http_client_set_header(client, "Authorization", auth);
+    esp_http_client_set_header(client, "Connection", "close");
     esp_http_client_set_post_field(client, body, (int)strlen(body));
 
     esp_err_t err = esp_http_client_perform(client);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP 请求失败: %s  body=%s", esp_err_to_name(err), body);
+        ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x)  heap=%u  body=%s",
+                 esp_err_to_name(err), (unsigned)err,
+                 (unsigned)esp_get_free_heap_size(), body);
+        /* 紧接着做一次 TCP 预检，方便区分 DNS / 路由 / TLS */
+        probe_api_endpoint();
         esp_http_client_cleanup(client);
         *out_status = -1;
         return THP_HTTP_TRANSIENT;
@@ -580,6 +687,8 @@ void app_main(void)
     }
 
     sntp_start();
+
+    probe_api_endpoint();
 
     if (!s_sht.present || !s_bmp.present) {
         ESP_LOGE(TAG, "传感器未全部就绪（SHT40=%d BMP280=%d），上报任务仍启动以便热修复后重试读",

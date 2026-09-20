@@ -12,6 +12,14 @@ CONFIG_BT_ENABLED=n
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=n
 CONFIG_ESP_WIFI_ENABLE_WPA3_SAE=y
 
+# 域名 经 Cloudflare 同时有 A/AAAA。
+# 家用路由（尤其移动 CMCC）上 ESP32 的 IPv6 常不可用，lwIP 若优先连 AAAA
+# 会表现为 esp-tls「Failed to open new connection in specified timeout」。
+# 设备侧关闭 IPv6，只走 IPv4。
+CONFIG_LWIP_IPV6=n
+CONFIG_LWIP_IPV4=y
+CONFIG_LWIP_DNS_MAX_SERVERS=3
+
 # 主任务栈：Wi-Fi + TLS + HTTP 会话较占栈
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 CONFIG_FREERTOS_HZ=1000
@@ -19,6 +27,16 @@ CONFIG_FREERTOS_HZ=1000
 # TLS：启用系统证书捆绑包（Cloudflare / 公网 HTTPS）
 # 注意：IDF 6.x 中 DEFAULT_BUNDLE / MAX_LEN 为隐藏符号，只开 CERTIFICATE_BUNDLE 即可
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+# 部分域名 走 GTS Root R4（交叉签名到 GlobalSign）。IDF6 捆绑包校验
+# 对该链可能报 "No matching trusted root"（issue #18674）。开启交叉签名校验
+# 并放宽证书数量；同时固件 main/thp_tls_trust.h 内嵌 GTS Root R4 作为 cert_pem。
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=512
+CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
+CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
 
 # 日志
 CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+# 连不上时把 esp-tls 细节打出来（连接成功后可改回 INFO 降噪）
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_LOG_MAXIMUM_LEVEL_DEBUG=y
