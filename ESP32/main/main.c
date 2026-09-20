@@ -35,6 +35,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "lwip/ip_addr.h"
 #include "nvs_flash.h"
 
@@ -559,6 +560,22 @@ static bool sample_read(thp_sample_t *out)
 static thp_reading_t s_offline_q[THP_OFFLINE_QUEUE_LEN];
 static size_t s_offline_head;   /* 最旧一条下标 */
 static size_t s_offline_count;
+static SemaphoreHandle_t s_q_mtx;     /* 队列：LOCAL/MI 两任务共用 */
+static SemaphoreHandle_t s_net_mtx;   /* HTTP/TLS：C3 上串行化握手，逻辑仍独立 */
+
+static void q_lock(void)
+{
+    if (s_q_mtx) {
+        xSemaphoreTake(s_q_mtx, portMAX_DELAY);
+    }
+}
+
+static void q_unlock(void)
+{
+    if (s_q_mtx) {
+        xSemaphoreGive(s_q_mtx);
+    }
+}
 
 /**
  * @brief 采样时刻打 UTC 戳；仅当至少成功 NTP 过一次且时钟可信时写 iso
@@ -579,8 +596,8 @@ static void reading_stamp_now(thp_reading_t *r)
 
 static void offline_queue_push(const thp_reading_t *r)
 {
+    q_lock();
     if (s_offline_count >= THP_OFFLINE_QUEUE_LEN) {
-        /* 队列满：丢最旧，保住较近数据 */
         s_offline_head = (s_offline_head + 1) % THP_OFFLINE_QUEUE_LEN;
         s_offline_count--;
         ESP_LOGW(TAG, "离线队列已满(>%d)，丢弃最旧一条", THP_OFFLINE_QUEUE_LEN);
@@ -588,35 +605,46 @@ static void offline_queue_push(const thp_reading_t *r)
     size_t idx = (s_offline_head + s_offline_count) % THP_OFFLINE_QUEUE_LEN;
     s_offline_q[idx] = *r;
     s_offline_count++;
+    unsigned n = (unsigned)s_offline_count;
+    q_unlock();
     ESP_LOGW(TAG, "已入离线队列 kind=%s (%u/%u) iso=%s%s%s",
-             kind_tag(r->kind),
-             (unsigned)s_offline_count, (unsigned)THP_OFFLINE_QUEUE_LEN,
+             kind_tag(r->kind), n, (unsigned)THP_OFFLINE_QUEUE_LEN,
              r->has_iso ? r->iso : "(no-ts)",
              r->has_th ? " TH" : "",
              r->has_p ? " P" : "");
 }
 
-static const thp_reading_t *offline_queue_peek(void)
+static bool offline_queue_peek_copy(thp_reading_t *out)
 {
-    if (s_offline_count == 0) {
-        return NULL;
+    if (out == NULL) {
+        return false;
     }
-    return &s_offline_q[s_offline_head];
+    q_lock();
+    if (s_offline_count == 0) {
+        q_unlock();
+        return false;
+    }
+    *out = s_offline_q[s_offline_head];
+    q_unlock();
+    return true;
 }
 
 static void offline_queue_pop(void)
 {
-    if (s_offline_count == 0) {
-        return;
+    q_lock();
+    if (s_offline_count > 0) {
+        s_offline_head = (s_offline_head + 1) % THP_OFFLINE_QUEUE_LEN;
+        s_offline_count--;
     }
-    s_offline_head = (s_offline_head + 1) % THP_OFFLINE_QUEUE_LEN;
-    s_offline_count--;
+    q_unlock();
 }
 
 static void offline_queue_clear(void)
 {
+    q_lock();
     s_offline_head = 0;
     s_offline_count = 0;
+    q_unlock();
 }
 
 /* ---------------- HTTPS 上报 ---------------- */
@@ -883,7 +911,23 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int 
     esp_http_client_set_header(client, "Connection", "close");
     esp_http_client_set_post_field(client, body, (int)strlen(body));
 
+    /* TLS 峰值内存有限：网络事务串行，但 LOCAL/MI 任务与重试预算相互独立 */
+    bool net_locked = false;
+    if (s_net_mtx) {
+        net_locked = xSemaphoreTake(s_net_mtx, pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS)) == pdTRUE;
+        if (!net_locked) {
+            ESP_LOGW(TAG, "HTTP 网络锁等待超时 kind=%s，本条按暂态失败处理", kind_tag(r->kind));
+            esp_http_client_cleanup(client);
+            *out_status = -1;
+            return THP_HTTP_TRANSIENT;
+        }
+    }
+
     esp_err_t err = esp_http_client_perform(client);
+    if (net_locked && s_net_mtx) {
+        xSemaphoreGive(s_net_mtx);
+        net_locked = false;
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x)  heap=%u  body=%s",
                  esp_err_to_name(err), (unsigned)err,
@@ -970,59 +1014,65 @@ static thp_http_result_t report_with_retry(const thp_reading_t *r, bool backfill
  */
 static void offline_queue_flush(void)
 {
-    if (s_offline_count == 0 || !wifi_is_connected()) {
+    if (!wifi_is_connected()) {
+        return;
+    }
+    q_lock();
+    unsigned pending = (unsigned)s_offline_count;
+    q_unlock();
+    if (pending == 0) {
         return;
     }
 
     ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d）",
-             (unsigned)s_offline_count, THP_OFFLINE_FLUSH_MAX_PER_CYCLE);
+             pending, THP_OFFLINE_FLUSH_MAX_PER_CYCLE);
 
     int sent_this_cycle = 0;
-    while (s_offline_count > 0) {
-        if (sent_this_cycle >= THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
-            ESP_LOGW(TAG, "本周期补传已达上限 %d，剩余 %u 条下轮继续",
-                     THP_OFFLINE_FLUSH_MAX_PER_CYCLE, (unsigned)s_offline_count);
-            return;
-        }
+    while (sent_this_cycle < THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
         if (!wifi_is_connected()) {
-            ESP_LOGW(TAG, "补传中断：Wi-Fi 断开，剩余 %u 条", (unsigned)s_offline_count);
+            ESP_LOGW(TAG, "补传中断：Wi-Fi 断开");
             return;
         }
-        const thp_reading_t *item = offline_queue_peek();
-        if (item == NULL) {
+        thp_reading_t item;
+        if (!offline_queue_peek_copy(&item)) {
             break;
         }
 
-        thp_http_result_t res = report_with_retry(item, true, 0);
+        thp_http_result_t res = report_with_retry(&item, true, 0);
         if (res == THP_HTTP_OK) {
             ESP_LOGI(TAG, "补传成功 kind=%s iso=%s",
-                     kind_tag(item->kind), item->has_iso ? item->iso : "(no-ts)");
+                     kind_tag(item.kind), item.has_iso ? item.iso : "(no-ts)");
             offline_queue_pop();
             sent_this_cycle++;
-            if (s_offline_count > 0 && sent_this_cycle < THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
+            if (sent_this_cycle < THP_OFFLINE_FLUSH_MAX_PER_CYCLE) {
                 vTaskDelay(pdMS_TO_TICKS(THP_OFFLINE_FLUSH_GAP_MS));
             }
             continue;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "补传遇 Token 失效 kind=%s，清空离线队列 %u 条（重烧配置前无意义）",
-                     kind_tag(item->kind), (unsigned)s_offline_count);
+            ESP_LOGE(TAG, "补传遇 Token 失效 kind=%s，清空离线队列", kind_tag(item.kind));
             offline_queue_clear();
             return;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
             ESP_LOGW(TAG, "补传条被服务端拒绝 kind=%s，丢弃 iso=%s",
-                     kind_tag(item->kind),
-                     item->has_iso ? item->iso : "(no-ts)");
+                     kind_tag(item.kind),
+                     item.has_iso ? item.iso : "(no-ts)");
             offline_queue_pop();
             continue;
         }
-        /* 暂态失败：网络仍不稳，保留剩余，下周期再试 */
-        ESP_LOGW(TAG, "补传暂态失败，剩余 %u 条等待下一轮", (unsigned)s_offline_count);
+        ESP_LOGW(TAG, "补传暂态失败，剩余等待下一轮");
         return;
     }
 
-    ESP_LOGI(TAG, "离线队列已清空");
+    q_lock();
+    unsigned left = (unsigned)s_offline_count;
+    q_unlock();
+    if (left == 0) {
+        ESP_LOGI(TAG, "离线队列已清空");
+    } else {
+        ESP_LOGI(TAG, "离线队列剩余 %u 条", left);
+    }
 }
 
 /* ---------------- 主流程 ---------------- */
@@ -1070,25 +1120,20 @@ static void report_mi_if_ready(void)
     if (!s_mi_ready) {
         return;
     }
-    /* 持续扫描应在跑；若被 stop 过则再拉起 */
+    /* 持续扫描保持开启；HTTP 不再停扫，避免影响 LOCAL/其它周期收包 */
     if (!atc_ble_is_scanning()) {
         (void)atc_ble_start_scan();
     }
 
     unsigned heap = (unsigned)esp_get_free_heap_size();
-    if (heap < 80000) {
-        ESP_LOGW(TAG, "heap_free=%u < 80KB，本周期跳过 MI 上报", heap);
-        /* 仍推进周期起点，避免积压逻辑错乱 */
+    if (heap < 70000) {
+        ESP_LOGW(TAG, "heap_free=%u < 70KB，本周期跳过 MI 上报", heap);
         s_mi_period_start_ms = esp_timer_get_time() / 1000;
         return;
     }
 
     atc_ble_sample_t mi;
-    /* HTTP 期间暂停扫描，降低 TLS 峰值内存；报完立刻恢复 */
-    (void)atc_ble_stop_scan();
-
     if (!mi_pick_period_sample(&mi)) {
-        (void)atc_ble_start_scan();
         s_mi_period_start_ms = esp_timer_get_time() / 1000;
         return;
     }
@@ -1110,17 +1155,17 @@ static void report_mi_if_ready(void)
              (long long)((esp_timer_get_time() / 1000) - mi.ts_ms),
              reading.has_iso ? reading.iso : "(no-ts)");
 
+    /* 独立重试预算：不占用 LOCAL 的失败路径 */
     thp_http_result_t res = report_with_retry(&reading, false, THP_REPORT_MAX_RETRIES);
     if (res == THP_HTTP_TRANSIENT) {
         offline_queue_push(&reading);
     }
 
-    /* 本周期处理完毕：下一周期从此刻之后收新帧 */
     s_mi_period_start_ms = esp_timer_get_time() / 1000;
-    (void)atc_ble_start_scan();
 }
-#endif /* THP_MI_ENABLE */
+#endif /* THP_MI_ENABLE — MI helpers */
 
+/** 仅 LOCAL：I2C 采样 + Token A，不碰 BLE/MI */
 static void thp_report_task(void *arg)
 {
     (void)arg;
@@ -1130,14 +1175,10 @@ static void thp_report_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(THP_REPORT_FIRST_DELAY_MS));
 
     while (1) {
-        /* 每次提交前用多 NTP 服务器同步系统时间（measured_at / 入队时间戳） */
         (void)sntp_sync_before_report();
-
-        /* 有积压且网络可用时，先补历史再报当前，保证时间轴大致有序 */
         offline_queue_flush();
 
         if (sample_read(&sample)) {
-            /* 先打 UTC/rssi 戳（会 memset），再写入业务字段 */
             reading_stamp_now(&reading);
             reading.kind = THP_KIND_LOCAL;
             reading.temperature = sample.temperature;
@@ -1166,26 +1207,44 @@ static void thp_report_task(void *arg)
             ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL 上报");
         }
 
-#if THP_MI_ENABLE
-        /* HTTP/TLS 期间停扫描；MI 在本机上报之后处理 */
-        report_mi_if_ready();
-#endif
-
-        /* 分片 delay + 心跳：避免 5 分钟静默期看起来像死机 */
-        {
-            int left = THP_REPORT_PERIOD_MS;
-            while (left > 0) {
-                int chunk = left > 30000 ? 30000 : left;
-                vTaskDelay(pdMS_TO_TICKS(chunk));
-                left -= chunk;
-                if (left > 0) {
-                    ESP_LOGI(TAG, "心跳 heap=%u 下一上报约 %ds 后",
-                             (unsigned)esp_get_free_heap_size(), left / 1000);
-                }
+        int left = THP_REPORT_PERIOD_MS;
+        while (left > 0) {
+            int chunk = left > 30000 ? 30000 : left;
+            vTaskDelay(pdMS_TO_TICKS(chunk));
+            left -= chunk;
+            if (left > 0) {
+                ESP_LOGI(TAG, "心跳[LOCAL] heap=%u 约 %ds 后下一 LOCAL",
+                         (unsigned)esp_get_free_heap_size(), left / 1000);
             }
         }
     }
 }
+
+#if THP_MI_ENABLE
+/** 仅 MI：持续扫描缓存 + Token B；与 LOCAL 任务并行、互不阻塞调度 */
+static void thp_report_mi_task(void *arg)
+{
+    (void)arg;
+    /* 与 LOCAL 错开，降低同时抢 TLS 网络锁的概率 */
+    vTaskDelay(pdMS_TO_TICKS(THP_REPORT_FIRST_DELAY_MS + 15000));
+    s_mi_period_start_ms = 0;
+
+    while (1) {
+        report_mi_if_ready();
+
+        int left = THP_REPORT_PERIOD_MS;
+        while (left > 0) {
+            int chunk = left > 30000 ? 30000 : left;
+            vTaskDelay(pdMS_TO_TICKS(chunk));
+            left -= chunk;
+            if (left > 0) {
+                ESP_LOGI(TAG, "心跳[MI] heap=%u 约 %ds 后下一 MI",
+                         (unsigned)esp_get_free_heap_size(), left / 1000);
+            }
+        }
+    }
+}
+#endif /* THP_MI_ENABLE */
 
 void app_main(void)
 {
@@ -1270,5 +1329,17 @@ void app_main(void)
                  s_sht.present, s_bmp.present);
     }
 
-    xTaskCreate(thp_report_task, "thp_report", 8192, NULL, 5, NULL);
+    s_q_mtx = xSemaphoreCreateMutex();
+    s_net_mtx = xSemaphoreCreateMutex();
+    if (s_q_mtx == NULL || s_net_mtx == NULL) {
+        ESP_LOGE(TAG, "创建互斥锁失败");
+    }
+
+    xTaskCreate(thp_report_task, "thp_local", 8192, NULL, 5, NULL);
+#if THP_MI_ENABLE
+    if (s_mi_ready) {
+        xTaskCreate(thp_report_mi_task, "thp_mi", 8192, NULL, 5, NULL);
+        ESP_LOGI(TAG, "已启动独立任务 thp_local + thp_mi");
+    }
+#endif
 }
