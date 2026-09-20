@@ -1,6 +1,13 @@
 idf_component_register(
     SRCS
         "main.c"
+        "thp_wifi.c"
+        "thp_time.c"
+        "thp_sensors.c"
+        "thp_queue.c"
+        "thp_report.c"
+        "thp_mi.c"
+        "thp_sched.c"
     INCLUDE_DIRS
         "."
     REQUIRES
@@ -23,4 +30,5 @@ idf_component_register(
         bt
 )
 # thp_config.h / thp_config.h.example：Wi-Fi 与 THP Token 配置（真实文件不入库）
-# i2c_config.h：板级 I2C 引脚与速率（与参考工程 esp32c3_sensors 一致）
+# i2c_config.h：板级 I2C 引脚与速率
+# 模块：wifi/time/sensors/queue/report/mi + sched（单周期流水线）

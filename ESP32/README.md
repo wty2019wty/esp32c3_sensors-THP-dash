@@ -32,16 +32,38 @@ ESP-IDF，新版 `i2c_master`
 ```
 ESP32/
 ├── CMakeLists.txt
-├── sdkconfig.defaults          # C3 / 4MB / 关蓝牙 / TLS 证书捆绑包
+├── sdkconfig.defaults          # C3 / 4MB / TLS 证书捆绑包
 ├── main/
-│   ├── main.c                  # I2C + Wi-Fi + SNTP + HTTPS 上报
+│   ├── main.c                  # 仅 boot：NVS → 传感器/Wi-Fi/队列 → 启动调度
+│   ├── thp_sched.c/h           # 单周期流水线：校时→补传→LOCAL→MI→睡眠
+│   ├── thp_wifi.c/h            # Wi-Fi STA（断线持续重连）
+│   ├── thp_time.c/h            # SNTP + ISO-8601
+│   ├── thp_sensors.c/h         # I2C + SHT40/BMP280 采样
+│   ├── thp_queue.c/h           # 离线 RAM 环形队列
+│   ├── thp_report.c/h          # HTTPS JSON 上报 / 重试 / 补传
+│   ├── thp_mi.c/h              # 小米计 BLE 周期上报（THP_MI_ENABLE）
+│   ├── thp_types.h             # 共享类型与量程校验
 │   ├── i2c_config.h            # SDA/SCL/速率
+│   ├── thp_tls_trust.h         # 内嵌 TLS 根证书
 │   ├── thp_config.h.example    # 配置模板
 │   └── thp_config.h            # 本地真实配置（gitignored，勿提交）
 └── components/
     ├── sht40/                  # 温湿度驱动（CRC-8）
-    └── bmp280/                 # 气压驱动（0x76/0x77，t_fine 补偿）
+    ├── bmp280/                 # 气压驱动（0x76/0x77，t_fine 补偿）
+    └── atc_ble/                # pvvx ATC BLE 扫描解析
 ```
+
+### 调度模型
+
+单 FreeRTOS 任务 `thp_cycle`，每 `THP_REPORT_PERIOD_MS` 跑一轮固定阶段：
+
+1. **校时** — Wi-Fi 可用时 `esp_netif_sntp_start` + 等待同步  
+2. **补传** — 最多 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE` 条历史  
+3. **LOCAL** — I2C 采样 → Token A 上报；失败入离线队列  
+4. **MI**（若就绪）— 取本周期 BLE 最近一帧 → Token B 上报  
+5. **睡眠** — 相对本周期起点补齐剩余时间，超时则立刻进入下一周期  
+
+不再使用 LOCAL/MI 两条独立任务；TLS 与队列在单线程周期内串行，无跨任务抢锁。
 
 ## 3. 配置
 
