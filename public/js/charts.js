@@ -441,6 +441,11 @@ export function drawCombined(canvas, points, opts = {}) {
         started = false;
         return;
       }
+      if (!Number.isFinite(p[key])) {
+        /* 部分字段缺省：断线而非连 0 */
+        started = false;
+        return;
+      }
       const x = xOf(t, xMin, xSpan, padL, plotW);
       const y = yOf(p[key], bounds, padT, plotH);
       if (!started) {
@@ -468,13 +473,13 @@ export function drawCombined(canvas, points, opts = {}) {
     if (t >= xMin && t <= xMax) {
       const x = xOf(t, xMin, xSpan, padL, plotW);
       drawCrosshair(ctx, x, box);
-      if (seriesList.includes('temperature')) {
+      if (seriesList.includes('temperature') && Number.isFinite(p.temperature)) {
         drawDot(ctx, x, yOf(p.temperature, left, padT, plotH), COLORS.temperature);
       }
-      if (seriesList.includes('humidity')) {
+      if (seriesList.includes('humidity') && Number.isFinite(p.humidity)) {
         drawDot(ctx, x, yOf(p.humidity, left, padT, plotH), COLORS.humidity);
       }
-      if (seriesList.includes('pressure')) {
+      if (seriesList.includes('pressure') && Number.isFinite(p.pressure)) {
         drawDot(ctx, x, yOf(p.pressure, right, padT, plotH), COLORS.pressure);
       }
     }
@@ -505,6 +510,10 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
 
   const vis = pointsInWindow(points, xWindow || null);
   const vals = vis.map((p) => p[key]).filter(Number.isFinite);
+  if (!vals.length) {
+    /* 该序列本窗口无有效点（部分字段全缺省） */
+    return;
+  }
   const bounds = niceBounds(Math.min(...vals), Math.max(...vals));
 
   ctx.strokeStyle = COLORS.grid;
@@ -532,6 +541,10 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
   points.forEach((p) => {
     const t = Date.parse(p.ts);
     if (t < xMin - xSpan * 0.02 || t > xMax + xSpan * 0.02) {
+      started = false;
+      return;
+    }
+    if (!Number.isFinite(p[key])) {
       started = false;
       return;
     }
@@ -572,7 +585,9 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
     if (t >= xMin && t <= xMax) {
       const x = xOf(t, xMin, xSpan, padL, plotW);
       drawCrosshair(ctx, x, box);
-      drawDot(ctx, x, yOf(p[key], bounds, padT, plotH), COLORS[key]);
+      if (Number.isFinite(p[key])) {
+        drawDot(ctx, x, yOf(p[key], bounds, padT, plotH), COLORS[key]);
+      }
     }
   }
 

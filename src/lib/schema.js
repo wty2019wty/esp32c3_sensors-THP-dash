@@ -46,9 +46,9 @@ CREATE TABLE IF NOT EXISTS readings (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   device_id    TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   ts           TEXT NOT NULL,
-  temperature  REAL NOT NULL,
-  humidity     REAL NOT NULL,
-  pressure     REAL NOT NULL,
+  temperature  REAL,
+  humidity     REAL,
+  pressure     REAL,
   measured_at  TEXT,
   rssi         INTEGER
 );
@@ -72,6 +72,62 @@ export async function ensureSchema(env) {
     if (!text) continue;
     await env.DB.prepare(text).run();
   }
+  await migrateReadingsNullable(env);
+  return true;
+}
+
+/**
+ * 旧库 readings 三列可能仍为 NOT NULL；重建为可空以支持部分字段上报。
+ * 用 sqlite_master 判断，避免依赖 D1 上不稳定的 PRAGMA。
+ * @returns {Promise<boolean>} 是否执行了迁移
+ */
+export async function migrateReadingsNullable(env) {
+  const row = await env.DB.prepare(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'readings'`
+  ).first();
+  const ddl = String(row?.sql || '');
+  if (!ddl) return false;
+  const metricCols = ['temperature', 'humidity', 'pressure'];
+  const needs = metricCols.some((name) => {
+    const re = new RegExp(`${name}\\s+REAL\\s+NOT\\s+NULL`, 'i');
+    return re.test(ddl);
+  });
+  if (!needs) return false;
+
+  // PRAGMA in D1 batch is unreliable — run outside batch and ignore failures.
+  try {
+    await env.DB.prepare(`PRAGMA foreign_keys=OFF`).run();
+  } catch {
+    /* ignore */
+  }
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS readings_mig (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id    TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+        ts           TEXT NOT NULL,
+        temperature  REAL,
+        humidity     REAL,
+        pressure     REAL,
+        measured_at  TEXT,
+        rssi         INTEGER
+      )
+    `),
+    env.DB.prepare(`
+      INSERT INTO readings_mig (id, device_id, ts, temperature, humidity, pressure, measured_at, rssi)
+      SELECT id, device_id, ts, temperature, humidity, pressure, measured_at, rssi FROM readings
+    `),
+    env.DB.prepare(`DROP TABLE IF EXISTS readings`),
+    env.DB.prepare(`ALTER TABLE readings_mig RENAME TO readings`),
+    env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_readings_device_ts ON readings(device_id, ts)`),
+  ]);
+
+  try {
+    await env.DB.prepare(`PRAGMA foreign_keys=ON`).run();
+  } catch {
+    /* ignore */
+  }
   return true;
 }
 
@@ -84,6 +140,7 @@ export function isMissingTableError(err) {
 export async function ensureSchemaAndCountUsers(env) {
   try {
     const row = await env.DB.prepare(`SELECT COUNT(*) AS c FROM users`).first();
+    await migrateReadingsNullable(env).catch(() => {});
     return Number(row?.c || 0);
   } catch (err) {
     if (!isMissingTableError(err)) throw err;

@@ -41,16 +41,37 @@ async function resolveDeviceFromToken(env, plain) {
   return row;
 }
 
-function validateReadingPayload(body) {
-  const t = Number(body?.temperature);
-  const h = Number(body?.humidity);
-  const p = Number(body?.pressure);
-  if (!Number.isFinite(t) || t < -40 || t > 85) return { error: 'temperature 不合法' };
-  if (!Number.isFinite(h) || h < 0 || h > 100) return { error: 'humidity 不合法' };
-  if (!Number.isFinite(p) || p < 300 || p > 1200) return { error: 'pressure 不合法' };
-  if (body?.device_id != null && body.device_id !== '' && body.device_id !== undefined) {
-    // checked by caller against token binding
+/**
+ * 读数字段可部分上报：仅温湿度（SHT40）或仅气压（BMP280）。
+ * 缺省字段必须为 undefined/null（不可用 NaN 或空串占位）。
+ */
+function parseOptionalMetric(body, key, min, max) {
+  if (body == null || body[key] === undefined || body[key] === null) {
+    return { present: false, value: null };
   }
+  const n = Number(body[key]);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    return { error: `${key} 不合法` };
+  }
+  return { present: true, value: round3(n) };
+}
+
+function validateReadingPayload(body) {
+  const t = parseOptionalMetric(body, 'temperature', -40, 85);
+  if (t.error) return { error: t.error };
+  const h = parseOptionalMetric(body, 'humidity', 0, 100);
+  if (h.error) return { error: h.error };
+  const p = parseOptionalMetric(body, 'pressure', 300, 1200);
+  if (p.error) return { error: p.error };
+
+  /* T/H 同源 SHT40，不允许只报其中一个 */
+  if (t.present !== h.present) {
+    return { error: 'temperature 与 humidity 必须同时上报（均来自 SHT40）' };
+  }
+  if (!t.present && !p.present) {
+    return { error: '至少上报 temperature/humidity 或 pressure' };
+  }
+
   let measuredAt = null;
   if (body?.measured_at) {
     if (!isValidIso(body.measured_at)) return { error: 'measured_at 必须是 ISO-8601 时间' };
@@ -63,9 +84,9 @@ function validateReadingPayload(body) {
   }
   return {
     values: {
-      temperature: round3(t),
-      humidity: round3(h),
-      pressure: round3(p),
+      temperature: t.present ? t.value : null,
+      humidity: h.present ? h.value : null,
+      pressure: p.present ? p.value : null,
       measuredAt,
       rssi,
     },
@@ -147,9 +168,9 @@ export async function loadSeries(env, deviceId, fromIso, toIso, opts = {}) {
   const mapRaw = (results) =>
     (results || []).map((r) => ({
       ts: r.ts,
-      temperature: r.temperature,
-      humidity: r.humidity,
-      pressure: r.pressure,
+      temperature: r.temperature == null ? null : r.temperature,
+      humidity: r.humidity == null ? null : r.humidity,
+      pressure: r.pressure == null ? null : r.pressure,
     }));
 
   const countRow = await env.DB.prepare(
@@ -194,9 +215,9 @@ export async function loadSeries(env, deviceId, fromIso, toIso, opts = {}) {
     const { results } = await env.DB.prepare(aggSql).bind(deviceId, fromIso, toIso).all();
     return (results || []).map((r) => ({
       ts: r.ts,
-      temperature: round3(r.temperature),
-      humidity: round3(r.humidity),
-      pressure: round3(r.pressure),
+      temperature: r.temperature == null ? null : round3(Number(r.temperature)),
+      humidity: r.humidity == null ? null : round3(Number(r.humidity)),
+      pressure: r.pressure == null ? null : round3(Number(r.pressure)),
     }));
   };
 

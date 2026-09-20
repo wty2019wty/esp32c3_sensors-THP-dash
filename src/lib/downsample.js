@@ -86,8 +86,8 @@ export function bucketStartIso(ts, bucketSeconds) {
 }
 
 /**
- * Fallback JS aggregation when SQL dialect helpers are unavailable.
- * @param {Array<{ts:string, temperature:number, humidity:number, pressure:number}>} rows
+ * JS 降采样；字段可为 null（部分传感器上报时缺省）。
+ * @param {Array<{ts:string, temperature?:number|null, humidity?:number|null, pressure?:number|null}>} rows
  * @param {number} bucketSeconds
  */
 export function aggregateRows(rows, bucketSeconds) {
@@ -97,21 +97,37 @@ export function aggregateRows(rows, bucketSeconds) {
     const key = bucketStartIso(r.ts, bucketSeconds);
     let acc = map.get(key);
     if (!acc) {
-      acc = { ts: key, temperature: 0, humidity: 0, pressure: 0, n: 0 };
+      acc = {
+        ts: key,
+        temperature: 0,
+        humidity: 0,
+        pressure: 0,
+        nT: 0,
+        nH: 0,
+        nP: 0,
+      };
       map.set(key, acc);
     }
-    acc.temperature += r.temperature;
-    acc.humidity += r.humidity;
-    acc.pressure += r.pressure;
-    acc.n += 1;
+    if (r.temperature != null && Number.isFinite(Number(r.temperature))) {
+      acc.temperature += Number(r.temperature);
+      acc.nT += 1;
+    }
+    if (r.humidity != null && Number.isFinite(Number(r.humidity))) {
+      acc.humidity += Number(r.humidity);
+      acc.nH += 1;
+    }
+    if (r.pressure != null && Number.isFinite(Number(r.pressure))) {
+      acc.pressure += Number(r.pressure);
+      acc.nP += 1;
+    }
   }
   return [...map.values()]
     .sort((a, b) => a.ts.localeCompare(b.ts))
     .map((a) => ({
       ts: a.ts,
-      temperature: round3(a.temperature / a.n),
-      humidity: round3(a.humidity / a.n),
-      pressure: round3(a.pressure / a.n),
+      temperature: a.nT ? round3(a.temperature / a.nT) : null,
+      humidity: a.nH ? round3(a.humidity / a.nH) : null,
+      pressure: a.nP ? round3(a.pressure / a.nP) : null,
     }));
 }
 

@@ -105,6 +105,8 @@ Content-Type: application/json
 ```
 
 - 温湿度口径 **SHT40**，气压 **BMP280**  
+- **支持部分上报**：仅 `{temperature,humidity}` 或仅 `{pressure}`；缺省字段为 SQL `NULL`，图表/CSV 显示为空缺  
+- `temperature` 与 `humidity` 必须同时出现（同源）；至少一组有效字段  
 - `device_id` 以 Token 绑定为准  
 
 ## API 一览
@@ -350,6 +352,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 - 框架：ESP-IDF（sht40 bmp280）
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
+- 部分上报：允许仅温湿度或仅气压；JSON 省略缺失字段；云端列为可空
 - 节奏：默认 5 分钟 HTTPS `POST /api/v1/readings` + Bearer Token
 - 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**；仓库仅 `.example`）
 - 重试：网络与 5xx 有限退避；401/403/400 不重发

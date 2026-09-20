@@ -52,15 +52,17 @@ CREATE INDEX IF NOT EXISTS idx_api_tokens_hash ON api_tokens(token_hash);
 
 -- ---------------------------------------------------------------------------
 -- Raw readings — permanent retention (no TTL)
--- T/H from SHT40, P from BMP280. Index for range queries.
+-- T/H from SHT40, P from BMP280.
+-- Metrics are nullable: device may report only T/H or only P.
+-- Index for range queries.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS readings (
   id           INTEGER PRIMARY KEY AUTOINCREMENT,
   device_id    TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   ts           TEXT NOT NULL,
-  temperature  REAL NOT NULL,
-  humidity     REAL NOT NULL,
-  pressure     REAL NOT NULL,
+  temperature  REAL,
+  humidity     REAL,
+  pressure     REAL,
   measured_at  TEXT,
   rssi         INTEGER
 );

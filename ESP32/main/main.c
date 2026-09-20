@@ -393,7 +393,9 @@ typedef struct {
     float temperature;  /* SHT40 */
     float humidity;     /* SHT40 */
     float pressure;     /* BMP280 hPa */
-    bool  valid;
+    bool  has_th;       /* 温湿度有效（SHT40） */
+    bool  has_p;        /* 气压有效（BMP280） */
+    bool  valid;        /* 至少一组字段有效 */
 } thp_sample_t;
 
 /** 一帧待上报/待补传读数；iso 为采样时刻 UTC（补传时写入 ts） */
@@ -401,57 +403,96 @@ typedef struct {
     float temperature;
     float humidity;
     float pressure;
+    bool has_th;
+    bool has_p;
     int rssi;
     char iso[ISO_UTC_BUF_LEN];
     bool has_iso;
 } thp_reading_t;
 
 /** 与 Worker validateReadingPayload 对齐（src/routes/readings.js） */
-static bool sample_in_range(const thp_sample_t *s)
+static bool th_in_range(float t, float h)
 {
-    if (s->temperature < -40.0f || s->temperature > 85.0f) {
-        return false;
-    }
-    if (s->humidity < 0.0f || s->humidity > 100.0f) {
-        return false;
-    }
-    if (s->pressure < 300.0f || s->pressure > 1200.0f) {
-        return false;
-    }
-    return true;
+    return t >= -40.0f && t <= 85.0f && h >= 0.0f && h <= 100.0f;
 }
 
+static bool p_in_range(float p)
+{
+    return p >= 300.0f && p <= 1200.0f;
+}
+
+/** 传感器未 present 时尝试重新初始化（热插拔/排线修复后不重启也能恢复） */
+static void sensors_retry_init_if_missing(void)
+{
+    if (!s_sht.present) {
+        if (sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
+            ESP_LOGW(TAG, "SHT40 热修复探测成功，恢复温湿度上报");
+        }
+    }
+    if (!s_bmp.present) {
+        if (bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
+            ESP_LOGW(TAG, "BMP280 热修复探测成功，恢复气压上报");
+        }
+    }
+}
+
+/**
+ * @brief 采样；允许仅温湿度或仅气压
+ * @return true：至少一组字段有效并可上报
+ */
 static bool sample_read(thp_sample_t *out)
 {
     memset(out, 0, sizeof(*out));
+    sensors_retry_init_if_missing();
 
     float sht_t = 0.0f, sht_h = 0.0f;
     float bmp_t = 0.0f, bmp_p = 0.0f, bmp_alt = 0.0f;
     int32_t t_fine = 0;
 
-    bool sht_ok = (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
+    bool sht_ok = s_sht.present && (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
     /* bmp_t 仅用于内部补偿展示；业务温度不使用 BMP280 */
-    bool bmp_ok = (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_alt, &t_fine) == ESP_OK);
+    bool bmp_ok = s_bmp.present && (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_alt, &t_fine) == ESP_OK);
 
     if (!sht_ok || !bmp_ok) {
         (void)i2c_master_bus_reset(s_bus);
+        /* 总线复位后各再试一次，便于瞬时 NAK 恢复 */
+        if (!sht_ok) {
+            sht_ok = s_sht.present && (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
+        }
+        if (!bmp_ok) {
+            bmp_ok = s_bmp.present && (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_alt, &t_fine) == ESP_OK);
+        }
     }
 
-    /* 口径：T/H = SHT40，P = BMP280。任一权威来源失败则本帧不上报。 */
-    if (!sht_ok || !bmp_ok) {
-        ESP_LOGW(TAG, "采样失败: SHT40=%s BMP280=%s", sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL");
-        return false;
+    if (sht_ok && th_in_range(sht_t, sht_h)) {
+        out->has_th = true;
+        out->temperature = sht_t;
+        out->humidity = sht_h;
+    } else if (sht_ok) {
+        ESP_LOGW(TAG, "温湿度超范围，本帧不带上报: T=%.2f H=%.2f",
+                 (double)sht_t, (double)sht_h);
     }
 
-    out->temperature = sht_t;
-    out->humidity = sht_h;
-    out->pressure = bmp_p;
-    out->valid = sample_in_range(out);
+    if (bmp_ok && p_in_range(bmp_p)) {
+        out->has_p = true;
+        out->pressure = bmp_p;
+    } else if (bmp_ok) {
+        ESP_LOGW(TAG, "气压超范围，本帧不带上报: P=%.2f", (double)bmp_p);
+    }
+
+    out->valid = out->has_th || out->has_p;
+
     if (!out->valid) {
-        ESP_LOGW(TAG, "采样超范围，跳过上报: T=%.2f H=%.2f P=%.2f (BMP 内部 T=%.2f 仅参考)",
-                 (double)out->temperature, (double)out->humidity,
-                 (double)out->pressure, (double)bmp_t);
+        ESP_LOGW(TAG, "采样无有效字段: SHT40=%s BMP280=%s present(th=%d p=%d)",
+                 sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL",
+                 s_sht.present, s_bmp.present);
         return false;
+    }
+
+    if (!sht_ok || !bmp_ok) {
+        ESP_LOGW(TAG, "部分采样: SHT40=%s BMP280=%s → 上报%s%s",
+                 sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL",
+                 out->has_th ? " 温湿度" : "", out->has_p ? " 气压" : "");
     }
     return true;
 }
@@ -490,10 +531,11 @@ static void offline_queue_push(const thp_reading_t *r)
     size_t idx = (s_offline_head + s_offline_count) % THP_OFFLINE_QUEUE_LEN;
     s_offline_q[idx] = *r;
     s_offline_count++;
-    ESP_LOGW(TAG, "已入离线队列 (%u/%u) iso=%s T=%.2f H=%.2f P=%.2f",
+    ESP_LOGW(TAG, "已入离线队列 (%u/%u) iso=%s%s%s",
              (unsigned)s_offline_count, (unsigned)THP_OFFLINE_QUEUE_LEN,
              r->has_iso ? r->iso : "(no-ts)",
-             (double)r->temperature, (double)r->humidity, (double)r->pressure);
+             r->has_th ? " TH" : "",
+             r->has_p ? " P" : "");
 }
 
 static const thp_reading_t *offline_queue_peek(void)
@@ -627,7 +669,9 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
     char device_part[96];
     char measured_part[64];
     char ts_part[64];
+    char metrics[96];
     int rssi = r->rssi;
+    size_t used = 0;
 
     device_part[0] = '\0';
     if (THP_DEVICE_ID[0] != '\0') {
@@ -636,6 +680,21 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
 
     measured_part[0] = '\0';
     ts_part[0] = '\0';
+    metrics[0] = '\0';
+
+    /* 部分字段：缺省传感器对应字段整体省略，不发 0/null 占位 */
+    if (r->has_th) {
+        used += (size_t)snprintf(metrics + used, sizeof(metrics) - used,
+                                 "\"temperature\":%.2f,\"humidity\":%.2f",
+                                 (double)r->temperature, (double)r->humidity);
+    }
+    if (r->has_p) {
+        if (used > 0 && used < sizeof(metrics) - 1) {
+            used += (size_t)snprintf(metrics + used, sizeof(metrics) - used, ",");
+        }
+        used += (size_t)snprintf(metrics + used, sizeof(metrics) - used,
+                                 "\"pressure\":%.2f", (double)r->pressure);
+    }
 
     if (backfill) {
         if (r->has_iso && r->iso[0] != '\0') {
@@ -647,9 +706,8 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
     }
 
     snprintf(buf, n,
-             "{\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.2f%s%s%s,\"rssi\":%d}",
-             (double)r->temperature, (double)r->humidity, (double)r->pressure,
-             device_part, measured_part, ts_part, rssi);
+             "{%s%s%s%s,\"rssi\":%d}",
+             metrics, device_part, measured_part, ts_part, rssi);
 }
 
 static thp_http_result_t classify_status(int status)
@@ -880,11 +938,20 @@ static void thp_report_task(void *arg)
             reading.temperature = sample.temperature;
             reading.humidity = sample.humidity;
             reading.pressure = sample.pressure;
+            reading.has_th = sample.has_th;
+            reading.has_p = sample.has_p;
 
-            ESP_LOGI(TAG, "采样 T=%.2f°C H=%.2f%% P=%.2fhPa iso=%s → %s",
-                     (double)sample.temperature, (double)sample.humidity,
-                     (double)sample.pressure,
+            ESP_LOGI(TAG, "采样%s%s iso=%s → %s",
+                     sample.has_th ? " T/H" : "",
+                     sample.has_p ? " P" : "",
                      reading.has_iso ? reading.iso : "(no-ts)", THP_API_BASE);
+            if (sample.has_th) {
+                ESP_LOGI(TAG, "  温湿度 T=%.2f°C H=%.2f%%",
+                         (double)sample.temperature, (double)sample.humidity);
+            }
+            if (sample.has_p) {
+                ESP_LOGI(TAG, "  气压 P=%.2fhPa", (double)sample.pressure);
+            }
 
             thp_http_result_t res = report_with_retry(&reading, false, THP_REPORT_MAX_RETRIES);
             if (res == THP_HTTP_TRANSIENT) {
@@ -920,11 +987,11 @@ void app_main(void)
 
     err = sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "SHT40 初始化失败：无温湿度则无法上报（口径禁止用 BMP 温度替代）");
+        ESP_LOGW(TAG, "SHT40 初始化失败：暂仅上报气压（若有）；任务内会重试探测（禁止用 BMP 温度替代）");
     }
     err = bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "BMP280 初始化失败：无气压则无法上报");
+        ESP_LOGW(TAG, "BMP280 初始化失败：暂仅上报温湿度（若有）；任务内会重试探测");
     }
 
     if (wifi_init_sta() != ESP_OK) {
@@ -947,7 +1014,7 @@ void app_main(void)
     probe_api_endpoint();
 
     if (!s_sht.present || !s_bmp.present) {
-        ESP_LOGE(TAG, "传感器未全部就绪（SHT40=%d BMP280=%d），上报任务仍启动以便热修复后重试读",
+        ESP_LOGW(TAG, "传感器未全部就绪（SHT40=%d BMP280=%d），支持仅温湿度或仅气压上报；任务内热修复重试",
                  s_sht.present, s_bmp.present);
     }
 

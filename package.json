@@ -14,7 +14,8 @@
     "check": "node --check src/index.js && node --check src/lib/crypto.js && node --check src/lib/auth.js && node --check src/lib/http.js && node --check src/lib/downsample.js && node --check src/lib/csv.js && node --check src/lib/schema.js && node --check src/routes/auth.js && node --check src/routes/devices.js && node --check src/routes/tokens.js && node --check src/routes/readings.js && node --check src/routes/export.js && node --check public/js/app.js && node --check public/js/api.js && node --check public/js/charts.js && node --check public/js/demo.js",
     "test:downsample": "node tools/test_export_strategy.mjs",
     "test:loadseries": "node tools/test_load_series_mock.mjs",
-    "test:unit": "node tools/test_export_strategy.mjs && node tools/test_load_series_mock.mjs"
+    "test:partial": "node tools/test_partial_readings.mjs",
+    "test:unit": "node tools/test_export_strategy.mjs && node tools/test_load_series_mock.mjs && node tools/test_partial_readings.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.24.0"
