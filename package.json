@@ -15,7 +15,8 @@
     "test:downsample": "node tools/test_export_strategy.mjs",
     "test:loadseries": "node tools/test_load_series_mock.mjs",
     "test:partial": "node tools/test_partial_readings.mjs",
-    "test:unit": "node tools/test_export_strategy.mjs && node tools/test_load_series_mock.mjs && node tools/test_partial_readings.mjs"
+    "test:atc": "node tools/test_atc_parse.mjs",
+    "test:unit": "node tools/test_export_strategy.mjs && node tools/test_load_series_mock.mjs && node tools/test_partial_readings.mjs && node tools/test_atc_parse.mjs"
   },
   "devDependencies": {
     "wrangler": "^4.24.0"
