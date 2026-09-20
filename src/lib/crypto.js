@@ -41,7 +41,8 @@ export async function hashCsrf(plain) {
  * Password hashing via PBKDF2-SHA256 (Web Crypto, no external deps).
  * Format: pbkdf2$sha256$iterations$salt_hex$hash_hex
  */
-export const PBKDF2_ITERATIONS = 210000;
+// Workers WebCrypto caps PBKDF2 at 100000 iterations
+export const PBKDF2_ITERATIONS = 100000;
 
 export async function hashPassword(password) {
   const iterations = PBKDF2_ITERATIONS;

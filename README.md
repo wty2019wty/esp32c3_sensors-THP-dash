@@ -322,7 +322,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 ## 安全要点
 
-- 密码：PBKDF2-SHA256（迭代 210000）  
+- 密码：PBKDF2-SHA256（迭代 100000，Workers WebCrypto 上限）  
 - 设备 Token / 会话：只存 SHA-256 哈希  
 - 会话 Cookie：HttpOnly + Secure + SameSite=Lax  
 - 会话 **滑动续期** 1 天（每次鉴权延长 `expires_at` 并刷新 Cookie `Max-Age`）  
