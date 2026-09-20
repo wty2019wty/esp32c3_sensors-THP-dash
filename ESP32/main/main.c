@@ -192,14 +192,44 @@ static bool wifi_is_connected(void)
     return (xEventGroupGetBits(s_wifi_events) & WIFI_CONNECTED_BIT) != 0;
 }
 
+#ifndef THP_NTP_NUM_SERVERS
+#define THP_NTP_NUM_SERVERS 1
+#endif
+#ifndef THP_NTP_SYNC_TIMEOUT_MS
+#define THP_NTP_SYNC_TIMEOUT_MS 20000
+#endif
+/* 兼容旧配置：仅 THP_NTP_SERVER */
+#ifndef THP_NTP_SERVER_LIST
+#ifdef THP_NTP_SERVER
+#define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST(THP_NTP_SERVER)
+#else
+#define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST("pool.ntp.org")
+#endif
+#endif
+
+#define ISO_UTC_BUF_LEN 32
+
 static void sntp_start(void)
 {
-    /* IDF 6.x：esp_netif_sntp_init(config)，无 handle 参数 */
-    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG(THP_NTP_SERVER);
+    /* IDF 6.x：esp_netif_sntp_init(config)；多服务器见 ESP_SNTP_SERVER_LIST */
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        THP_NTP_NUM_SERVERS, THP_NTP_SERVER_LIST);
     cfg.start = true;
     cfg.wait_for_sync = true;
     cfg.server_from_dhcp = false;
     cfg.renew_servers_after_new_IP = false;
+    cfg.smooth_sync = false;
+
+    if (cfg.num_of_servers > CONFIG_LWIP_SNTP_MAX_SERVERS) {
+        ESP_LOGW(TAG, "NTP 服务器数 %u 超过 CONFIG_LWIP_SNTP_MAX_SERVERS=%d，将截断",
+                 (unsigned)cfg.num_of_servers, CONFIG_LWIP_SNTP_MAX_SERVERS);
+        cfg.num_of_servers = CONFIG_LWIP_SNTP_MAX_SERVERS;
+    }
+
+    ESP_LOGI(TAG, "NTP 服务器 %u 个：", (unsigned)cfg.num_of_servers);
+    for (size_t i = 0; i < cfg.num_of_servers && i < CONFIG_LWIP_SNTP_MAX_SERVERS; i++) {
+        ESP_LOGI(TAG, "  [%u] %s", (unsigned)i, cfg.servers[i] ? cfg.servers[i] : "(null)");
+    }
 
     esp_err_t err = esp_netif_sntp_init(&cfg);
     if (err != ESP_OK) {
@@ -207,13 +237,12 @@ static void sntp_start(void)
         return;
     }
 
-    /* 等待首次同步（最长 15s）；失败则省略 measured_at，由服务端时间入库 */
-    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(15000));
+    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(THP_NTP_SYNC_TIMEOUT_MS));
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "SNTP 时间已同步");
+        ESP_LOGI(TAG, "启动时 SNTP 时间已同步");
         xEventGroupSetBits(s_wifi_events, SNTP_SYNC_BIT);
     } else {
-        ESP_LOGW(TAG, "SNTP 同步失败/超时(%s)，measured_at 将省略（服务端时间权威）",
+        ESP_LOGW(TAG, "启动时 SNTP 同步失败/超时(%s)，将由每次上报前再同步",
                  esp_err_to_name(err));
     }
 }
@@ -223,22 +252,22 @@ static void sntp_start(void)
  * @param[out] out 至少 ISO_UTC_BUF_LEN 字节
  * @return true 时间有效；false 未同步则调用方应省略 measured_at
  */
-#define ISO_UTC_BUF_LEN 32
-
 static bool format_iso_utc(char *out)
 {
     if (out == NULL) {
         return false;
     }
     out[0] = '\0';
-    if ((xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) == 0) {
-        return false;
-    }
     time_t now = 0;
     struct timeval tv = {0};
     time(&now);
     gettimeofday(&tv, NULL);
+    /* 未校时或系统时钟明显未就绪时不生成 measured_at */
     if (now < 1600000000) {
+        return false;
+    }
+    if ((xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) == 0) {
+        /* 至少成功同步过一次才写 measured_at，避免上电假时间 */
         return false;
     }
     struct tm tm_utc;
@@ -281,10 +310,55 @@ static bool format_iso_utc(char *out)
         ms = 999;
     }
 
-    /* 固定字段宽度 + 已限幅整数，避免 -Wformat-truncation */
     snprintf(out, ISO_UTC_BUF_LEN, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
              year, mon, day, hour, min, sec, ms);
     return out[0] != '\0';
+}
+
+/**
+ * @brief 每次上报前用多 NTP 服务器同步系统时间
+ * @return true 表示可写 measured_at（本次同步成功，或同步失败但已有可信系统时间）
+ */
+static bool sntp_sync_before_report(void)
+{
+    if (!wifi_is_connected()) {
+        ESP_LOGW(TAG, "上报前 NTP：Wi-Fi 未连接，跳过同步");
+        return (xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) != 0;
+    }
+
+    /* restart：已 init 则立即重新查询全部配置的 NTP 服务器 */
+    esp_err_t err = esp_netif_sntp_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_netif_sntp_start/restart: %s", esp_err_to_name(err));
+    }
+
+    err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(THP_NTP_SYNC_TIMEOUT_MS));
+    if (err == ESP_OK || err == ESP_ERR_NOT_FINISHED) {
+        xEventGroupSetBits(s_wifi_events, SNTP_SYNC_BIT);
+        char iso[ISO_UTC_BUF_LEN];
+        if (format_iso_utc(iso)) {
+            ESP_LOGI(TAG, "上报前 NTP 同步 OK  UTC=%s (%s)",
+                     iso, (err == ESP_OK) ? "synced" : "in-progress");
+        } else {
+            ESP_LOGI(TAG, "上报前 NTP 同步 OK（%s）", esp_err_to_name(err));
+        }
+        return true;
+    }
+
+    time_t now = 0;
+    time(&now);
+    const bool had_sync = (xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) != 0;
+    if (had_sync && now > 1600000000) {
+        char iso[ISO_UTC_BUF_LEN];
+        format_iso_utc(iso);
+        ESP_LOGW(TAG, "上报前 NTP 超时(%s)，沿用已有系统时间 UTC=%s",
+                 esp_err_to_name(err), iso[0] ? iso : "(n/a)");
+        return true;
+    }
+
+    ESP_LOGW(TAG, "上报前 NTP 同步失败(%s)，本条可能不带 measured_at",
+             esp_err_to_name(err));
+    return false;
 }
 
 /* ---------------- 传感器采样与业务校验 ---------------- */
@@ -629,6 +703,9 @@ static void thp_report_task(void *arg)
     vTaskDelay(pdMS_TO_TICKS(THP_REPORT_FIRST_DELAY_MS));
 
     while (1) {
+        /* 每次提交前用多 NTP 服务器同步系统时间（measured_at） */
+        (void)sntp_sync_before_report();
+
         if (sample_read(&sample)) {
             ESP_LOGI(TAG, "采样 T=%.2f°C H=%.2f%% P=%.2fhPa → %s",
                      (double)sample.temperature, (double)sample.humidity,

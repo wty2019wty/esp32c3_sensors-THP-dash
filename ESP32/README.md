@@ -59,6 +59,8 @@ copy main\thp_config.h.example main\thp_config.h
 | `THP_DEVICE_TOKEN` | Dash 管理页生成的上报 Token（`thp_...`，明文只显示一次） |
 | `THP_DEVICE_ID` | 可选；须与 Token 绑定设备一致，一般留空 |
 | `THP_REPORT_PERIOD_MS` | 默认 `5*60*1000`（5 分钟，288 条/天） |
+| `THP_NTP_SERVER_LIST` | 多 NTP 源；**每次上报前** `esp_netif_sntp_start()` 重启查询并等待同步（默认阿里云 / cn.pool / 国家授时中心 / pool） |
+| `THP_NTP_SYNC_TIMEOUT_MS` | 单次上报前校时超时，默认 20000ms；失败但已有可信时间则沿用 |
 
 > 安全：`thp_config.h` 已被 `.gitignore` 忽略；**不要**把 Token 提交进仓库（REQUIREMENTS.md §12.7）。
 
@@ -116,6 +118,9 @@ Content-Type: application/json
 | --- | --- |
 | `Wi-Fi STA max TX power = 15 dBm` | 已按配置限制发射功率（天线差的 Super Mini 用） |
 | `Wi-Fi 已连接，IP=...` | STA 就绪 |
+| `NTP 服务器 4 个: [0] ntp.aliyun.com ...` | 启动时已配置多源校时 |
+| `上报前 NTP 同步 OK  UTC=...` | 提交前系统时间已刷新，body 会带 `measured_at` |
+| `上报前 NTP 超时...沿用已有系统时间` | 本次未校时成功，仍可能上报 |
 | `探测 https://... heap_free=...` | 连通性预检开始 |
 | `DNS host -> IPv4 a.b.c.d:443` | 解析成功（只查 A 记录） |
 | `TCP connect ... OK` | 网络可达；若仍 HTTPS 失败则是 TLS/证书 |
