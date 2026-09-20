@@ -56,6 +56,14 @@
 #define THP_REPORT_MAX_RETRIES  3
 #define THP_REPORT_RETRY_BASE_MS 2000
 
+/* ---------------- 离线补传 ----------------
+ * 网络/5xx 重试仍失败时入队；恢复后按时间顺序补传（body 带历史 ts）。
+ * 288 ≈ 5 分钟周期 × 24h；队列满丢最旧。仅 RAM，断电不保留。
+ * 补传条与条之间的间隔（毫秒），避免瞬时打满接口。
+ */
+#define THP_OFFLINE_QUEUE_LEN     288
+#define THP_OFFLINE_FLUSH_GAP_MS  200
+
 /* 单次 HTTP(S) 请求总超时（毫秒）。走 Cloudflare 时 TLS 握手偏慢，建议 ≥30s */
 #define THP_HTTP_TIMEOUT_MS     40000
 

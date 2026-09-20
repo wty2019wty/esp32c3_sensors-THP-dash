@@ -58,6 +58,13 @@ static const char *TAG = "thp";
 #endif
 #define HTTP_RECV_BUF       1024
 
+#ifndef THP_OFFLINE_QUEUE_LEN
+#define THP_OFFLINE_QUEUE_LEN 288
+#endif
+#ifndef THP_OFFLINE_FLUSH_GAP_MS
+#define THP_OFFLINE_FLUSH_GAP_MS 200
+#endif
+
 static EventGroupHandle_t s_wifi_events;
 static i2c_master_bus_handle_t s_bus;
 static sht40_t s_sht;
@@ -248,26 +255,11 @@ static void sntp_start(void)
 }
 
 /**
- * @brief 生成 ISO-8601 UTC 时间戳，如 2026-01-01T12:00:00.000Z
- * @param[out] out 至少 ISO_UTC_BUF_LEN 字节
- * @return true 时间有效；false 未同步则调用方应省略 measured_at
+ * @brief 将指定 UTC 时刻格式化为 ISO-8601（历史补传用，ms=000）
  */
-static bool format_iso_utc(char *out)
+static bool format_iso_utc_at(time_t now, char *out)
 {
-    if (out == NULL) {
-        return false;
-    }
-    out[0] = '\0';
-    time_t now = 0;
-    struct timeval tv = {0};
-    time(&now);
-    gettimeofday(&tv, NULL);
-    /* 未校时或系统时钟明显未就绪时不生成 measured_at */
-    if (now < 1600000000) {
-        return false;
-    }
-    if ((xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) == 0) {
-        /* 至少成功同步过一次才写 measured_at，避免上电假时间 */
+    if (out == NULL || now < 1600000000) {
         return false;
     }
     struct tm tm_utc;
@@ -303,15 +295,49 @@ static bool format_iso_utc(char *out)
     if (sec < 0 || sec > 60) {
         sec = 0;
     }
+
+    snprintf(out, ISO_UTC_BUF_LEN, "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
+             year, mon, day, hour, min, sec);
+    return out[0] != '\0';
+}
+
+/**
+ * @brief 生成当前时刻 ISO-8601 UTC，如 2026-01-01T12:00:00.000Z
+ * @param[out] out 至少 ISO_UTC_BUF_LEN 字节
+ * @return true 时间有效；false 未同步则调用方应省略 measured_at
+ */
+static bool format_iso_utc(char *out)
+{
+    if (out == NULL) {
+        return false;
+    }
+    out[0] = '\0';
+    time_t now = 0;
+    struct timeval tv = {0};
+    time(&now);
+    gettimeofday(&tv, NULL);
+    /* 未校时或系统时钟明显未就绪时不生成 measured_at */
+    if (now < 1600000000) {
+        return false;
+    }
+    if ((xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) == 0) {
+        /* 至少成功同步过一次才写 measured_at，避免上电假时间 */
+        return false;
+    }
+    if (!format_iso_utc_at(now, out)) {
+        return false;
+    }
     int ms = (int)(tv.tv_usec / 1000);
     if (ms < 0) {
         ms = 0;
     } else if (ms > 999) {
         ms = 999;
     }
-
-    snprintf(out, ISO_UTC_BUF_LEN, "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
-             year, mon, day, hour, min, sec, ms);
+    /* format_iso_utc_at 以 ".000Z" 结尾；就地改写毫秒 */
+    size_t len = strlen(out);
+    if (len >= 5) {
+        snprintf(out + len - 5, 6, ".%03dZ", ms);
+    }
     return out[0] != '\0';
 }
 
@@ -370,6 +396,16 @@ typedef struct {
     bool  valid;
 } thp_sample_t;
 
+/** 一帧待上报/待补传读数；iso 为采样时刻 UTC（补传时写入 ts） */
+typedef struct {
+    float temperature;
+    float humidity;
+    float pressure;
+    int rssi;
+    char iso[ISO_UTC_BUF_LEN];
+    bool has_iso;
+} thp_reading_t;
+
 /** 与 Worker validateReadingPayload 对齐（src/routes/readings.js） */
 static bool sample_in_range(const thp_sample_t *s)
 {
@@ -418,6 +454,69 @@ static bool sample_read(thp_sample_t *out)
         return false;
     }
     return true;
+}
+
+/* ---------------- 离线补传队列（RAM 环形缓冲） ---------------- */
+
+static thp_reading_t s_offline_q[THP_OFFLINE_QUEUE_LEN];
+static size_t s_offline_head;   /* 最旧一条下标 */
+static size_t s_offline_count;
+
+/**
+ * @brief 采样时刻打 UTC 戳；仅当至少成功 NTP 过一次且时钟可信时写 iso
+ */
+static void reading_stamp_now(thp_reading_t *r)
+{
+    memset(r, 0, sizeof(*r));
+    time_t now = 0;
+    time(&now);
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        r->rssi = ap.rssi;
+    }
+    if ((xEventGroupGetBits(s_wifi_events) & SNTP_SYNC_BIT) != 0) {
+        r->has_iso = format_iso_utc(r->iso);
+    }
+}
+
+static void offline_queue_push(const thp_reading_t *r)
+{
+    if (s_offline_count >= THP_OFFLINE_QUEUE_LEN) {
+        /* 队列满：丢最旧，保住较近数据 */
+        s_offline_head = (s_offline_head + 1) % THP_OFFLINE_QUEUE_LEN;
+        s_offline_count--;
+        ESP_LOGW(TAG, "离线队列已满(>%d)，丢弃最旧一条", THP_OFFLINE_QUEUE_LEN);
+    }
+    size_t idx = (s_offline_head + s_offline_count) % THP_OFFLINE_QUEUE_LEN;
+    s_offline_q[idx] = *r;
+    s_offline_count++;
+    ESP_LOGW(TAG, "已入离线队列 (%u/%u) iso=%s T=%.2f H=%.2f P=%.2f",
+             (unsigned)s_offline_count, (unsigned)THP_OFFLINE_QUEUE_LEN,
+             r->has_iso ? r->iso : "(no-ts)",
+             (double)r->temperature, (double)r->humidity, (double)r->pressure);
+}
+
+static const thp_reading_t *offline_queue_peek(void)
+{
+    if (s_offline_count == 0) {
+        return NULL;
+    }
+    return &s_offline_q[s_offline_head];
+}
+
+static void offline_queue_pop(void)
+{
+    if (s_offline_count == 0) {
+        return;
+    }
+    s_offline_head = (s_offline_head + 1) % THP_OFFLINE_QUEUE_LEN;
+    s_offline_count--;
+}
+
+static void offline_queue_clear(void)
+{
+    s_offline_head = 0;
+    s_offline_count = 0;
 }
 
 /* ---------------- HTTPS 上报 ---------------- */
@@ -517,17 +616,18 @@ static void probe_api_endpoint(void)
     close(sock);
 }
 
-static void build_json(const thp_sample_t *s, char *buf, size_t n)
+/**
+ * @brief 组装 readings JSON
+ * @param backfill true：用 r->iso 作为历史 ts + measured_at（云端按 ts 落点）
+ *                 false：实时上报，不发 ts（入库时间以服务端为准）
+ */
+static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t n)
 {
-    char iso[ISO_UTC_BUF_LEN];
+    char live_iso[ISO_UTC_BUF_LEN];
     char device_part[96];
     char measured_part[64];
-    int rssi = 0;
-    wifi_ap_record_t ap;
-
-    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
-        rssi = ap.rssi;
-    }
+    char ts_part[64];
+    int rssi = r->rssi;
 
     device_part[0] = '\0';
     if (THP_DEVICE_ID[0] != '\0') {
@@ -535,14 +635,21 @@ static void build_json(const thp_sample_t *s, char *buf, size_t n)
     }
 
     measured_part[0] = '\0';
-    if (format_iso_utc(iso)) {
-        snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", iso);
+    ts_part[0] = '\0';
+
+    if (backfill) {
+        if (r->has_iso && r->iso[0] != '\0') {
+            snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", r->iso);
+            snprintf(ts_part, sizeof(ts_part), ",\"ts\":\"%s\"", r->iso);
+        }
+    } else if (format_iso_utc(live_iso)) {
+        snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", live_iso);
     }
 
     snprintf(buf, n,
-             "{\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.2f%s%s,\"rssi\":%d}",
-             (double)s->temperature, (double)s->humidity, (double)s->pressure,
-             device_part, measured_part, rssi);
+             "{\"temperature\":%.2f,\"humidity\":%.2f,\"pressure\":%.2f%s%s%s,\"rssi\":%d}",
+             (double)r->temperature, (double)r->humidity, (double)r->pressure,
+             device_part, measured_part, ts_part, rssi);
 }
 
 static thp_http_result_t classify_status(int status)
@@ -563,10 +670,10 @@ static thp_http_result_t classify_status(int status)
  * @brief POST 一次读数
  * @return 分类结果；*out_status 为 HTTP 状态码（网络错误时为负的 esp_http_client 错误）
  */
-static thp_http_result_t report_once(const thp_sample_t *s, int *out_status)
+static thp_http_result_t report_once(const thp_reading_t *r, bool backfill, int *out_status)
 {
     char url[256];
-    char body[320];
+    char body[384];
     char auth[160];
     char resp[HTTP_RECV_BUF];
 
@@ -583,7 +690,7 @@ static thp_http_result_t report_once(const thp_sample_t *s, int *out_status)
     }
     snprintf(url, sizeof(url), "%.*s/api/v1/readings", (int)base_len, base);
 
-    build_json(s, body, sizeof(body));
+    build_json(r, backfill, body, sizeof(body));
     snprintf(auth, sizeof(auth), "Bearer %s", THP_DEVICE_TOKEN);
 
     esp_http_client_config_t cfg = {
@@ -608,8 +715,8 @@ static thp_http_result_t report_once(const thp_sample_t *s, int *out_status)
     cfg.cert_pem = NULL;
 #endif
 
-    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms",
-             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS);
+    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d",
+             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS, (int)backfill);
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
@@ -657,40 +764,97 @@ static thp_http_result_t report_once(const thp_sample_t *s, int *out_status)
 }
 
 /**
- * @brief 按需求 §10：401/403/400 不重发；网络/5xx 有限次数退避重试
+ * @brief 有限次重试；backfill 时通常只试 1 次，失败留给下一轮再补
+ * @return 最终分类结果（含 Wi-Fi 未连 / 重试耗尽 → TRANSIENT）
  */
-static void report_with_retry(const thp_sample_t *s)
+static thp_http_result_t report_with_retry(const thp_reading_t *r, bool backfill, int max_retries)
 {
-    for (int attempt = 0; attempt <= THP_REPORT_MAX_RETRIES; attempt++) {
+    if (max_retries < 0) {
+        max_retries = 0;
+    }
+    for (int attempt = 0; attempt <= max_retries; attempt++) {
         if (!wifi_is_connected()) {
             ESP_LOGW(TAG, "Wi-Fi 未连接，等待下一轮");
-            return;
+            return THP_HTTP_TRANSIENT;
         }
 
         int status = 0;
-        thp_http_result_t r = report_once(s, &status);
-        if (r == THP_HTTP_OK) {
-            return;
+        thp_http_result_t res = report_once(r, backfill, &status);
+        if (res == THP_HTTP_OK) {
+            return THP_HTTP_OK;
         }
-        if (r == THP_HTTP_AUTH_FAIL) {
+        if (res == THP_HTTP_AUTH_FAIL) {
             ESP_LOGE(TAG, "Token 无效或已吊销 (HTTP %d)，请在 Dash 重新生成", status);
-            return;
+            return THP_HTTP_AUTH_FAIL;
         }
-        if (r == THP_HTTP_BAD_PAYLOAD) {
+        if (res == THP_HTTP_BAD_PAYLOAD) {
             ESP_LOGE(TAG, "服务端拒绝载荷 (HTTP %d)，本周期不重试", status);
-            return;
+            return THP_HTTP_BAD_PAYLOAD;
         }
 
-        if (attempt < THP_REPORT_MAX_RETRIES) {
+        if (attempt < max_retries) {
             uint32_t backoff = THP_REPORT_RETRY_BASE_MS * (1u << attempt);
             ESP_LOGW(TAG, "上报暂态失败 (attempt=%d/%d status=%d)，%lums 后重试",
-                     attempt + 1, THP_REPORT_MAX_RETRIES, status,
+                     attempt + 1, max_retries, status,
                      (unsigned long)backoff);
             vTaskDelay(pdMS_TO_TICKS(backoff));
         } else {
-            ESP_LOGE(TAG, "上报失败，已达最大重试次数，等待下一周期");
+            ESP_LOGW(TAG, "上报暂态失败 (attempt=%d/%d status=%d)%s",
+                     attempt + 1, max_retries + 1, status,
+                     backfill ? "，本条暂留队列" : "，将入离线队列");
         }
     }
+    return THP_HTTP_TRANSIENT;
+}
+
+/**
+ * @brief 网络恢复后按时间顺序补传队列（body 带历史 ts）
+ */
+static void offline_queue_flush(void)
+{
+    if (s_offline_count == 0 || !wifi_is_connected()) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条", (unsigned)s_offline_count);
+
+    while (s_offline_count > 0) {
+        if (!wifi_is_connected()) {
+            ESP_LOGW(TAG, "补传中断：Wi-Fi 断开，剩余 %u 条", (unsigned)s_offline_count);
+            return;
+        }
+        const thp_reading_t *item = offline_queue_peek();
+        if (item == NULL) {
+            break;
+        }
+
+        thp_http_result_t res = report_with_retry(item, true, 0);
+        if (res == THP_HTTP_OK) {
+            ESP_LOGI(TAG, "补传成功 iso=%s", item->has_iso ? item->iso : "(no-ts)");
+            offline_queue_pop();
+            if (s_offline_count > 0) {
+                vTaskDelay(pdMS_TO_TICKS(THP_OFFLINE_FLUSH_GAP_MS));
+            }
+            continue;
+        }
+        if (res == THP_HTTP_AUTH_FAIL) {
+            ESP_LOGE(TAG, "补传遇 Token 失效，清空离线队列 %u 条（重烧配置前无意义）",
+                     (unsigned)s_offline_count);
+            offline_queue_clear();
+            return;
+        }
+        if (res == THP_HTTP_BAD_PAYLOAD) {
+            ESP_LOGW(TAG, "补传条被服务端拒绝，丢弃 iso=%s",
+                     item->has_iso ? item->iso : "(no-ts)");
+            offline_queue_pop();
+            continue;
+        }
+        /* 暂态失败：网络仍不稳，保留剩余，下周期再试 */
+        ESP_LOGW(TAG, "补传暂态失败，剩余 %u 条等待下一轮", (unsigned)s_offline_count);
+        return;
+    }
+
+    ESP_LOGI(TAG, "离线队列已清空");
 }
 
 /* ---------------- 主流程 ---------------- */
@@ -699,18 +863,33 @@ static void thp_report_task(void *arg)
 {
     (void)arg;
     thp_sample_t sample;
+    thp_reading_t reading;
 
     vTaskDelay(pdMS_TO_TICKS(THP_REPORT_FIRST_DELAY_MS));
 
     while (1) {
-        /* 每次提交前用多 NTP 服务器同步系统时间（measured_at） */
+        /* 每次提交前用多 NTP 服务器同步系统时间（measured_at / 入队时间戳） */
         (void)sntp_sync_before_report();
 
+        /* 有积压且网络可用时，先补历史再报当前，保证时间轴大致有序 */
+        offline_queue_flush();
+
         if (sample_read(&sample)) {
-            ESP_LOGI(TAG, "采样 T=%.2f°C H=%.2f%% P=%.2fhPa → %s",
+            /* 先打 UTC/rssi 戳（会 memset），再写入业务字段 */
+            reading_stamp_now(&reading);
+            reading.temperature = sample.temperature;
+            reading.humidity = sample.humidity;
+            reading.pressure = sample.pressure;
+
+            ESP_LOGI(TAG, "采样 T=%.2f°C H=%.2f%% P=%.2fhPa iso=%s → %s",
                      (double)sample.temperature, (double)sample.humidity,
-                     (double)sample.pressure, THP_API_BASE);
-            report_with_retry(&sample);
+                     (double)sample.pressure,
+                     reading.has_iso ? reading.iso : "(no-ts)", THP_API_BASE);
+
+            thp_http_result_t res = report_with_retry(&reading, false, THP_REPORT_MAX_RETRIES);
+            if (res == THP_HTTP_TRANSIENT) {
+                offline_queue_push(&reading);
+            }
         } else {
             ESP_LOGW(TAG, "本周期无有效采样，跳过上报");
         }
@@ -721,8 +900,8 @@ static void thp_report_task(void *arg)
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "THP Dash 设备端启动  period=%dms  base=%s",
-             THP_REPORT_PERIOD_MS, THP_API_BASE);
+    ESP_LOGI(TAG, "THP Dash 设备端启动  period=%dms  offline_q=%d  base=%s",
+             THP_REPORT_PERIOD_MS, THP_OFFLINE_QUEUE_LEN, THP_API_BASE);
 
     if (strcmp(THP_DEVICE_TOKEN, "thp_replace_me") == 0 ||
         strlen(THP_DEVICE_TOKEN) < 8) {
