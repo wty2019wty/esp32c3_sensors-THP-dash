@@ -1,5 +1,13 @@
 import { api, setCsrf, syncCsrfFromCookie, exportCsv, isDemo, setDemo } from './api.js';
-import { drawAll, bindChartCursor, pointAt } from './charts.js';
+import {
+  drawAll,
+  bindChartCursor,
+  pointAt,
+  dataBounds,
+  clampWin,
+  isZoomed,
+  minSpanForPoints,
+} from './charts.js';
 
 const $ = (sel, el = document) => el.querySelector(sel);
 const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
@@ -19,8 +27,8 @@ function updateChartHelp() {
   const el = $('#chart-help');
   if (!el) return;
   el.textContent = isCoarsePointer()
-    ? '在曲线上点选可查看该时刻数据；再点其它点可切换，再次点选取消。'
-    : '在曲线上移动光标可查看该时刻数据；点击固定，再次点击或 Esc 取消；键盘 ←/→ 可逐点查看。';
+    ? '双指缩放时间轴；横向拖动平移。点选曲线查看该时刻数据；需要时点「重置缩放」恢复全程。'
+    : '滚轮/触控板缩放时间轴（可放大到采样点附近）；放大后拖动平移。悬停查看数据，点击固定；点「重置缩放」恢复全程。';
 }
 
 const state = {
@@ -36,6 +44,11 @@ const state = {
   granularity: null,
 };
 
+/** Time-axis zoom window (ms); null = full range */
+const chartZoom = {
+  win: null,
+};
+
 /** chart cursor inspection (hover / pin) */
 const cursor = {
   ctrl: null,
@@ -43,6 +56,63 @@ const cursor = {
   pinned: false,
   lastPointer: { x: 0, y: 0 },
 };
+
+function currentXWindow() {
+  const full = dataBounds(state.points);
+  if (!full) return null;
+  return clampWin(chartZoom.win, full.min, full.max, minSpanForPoints(state.points));
+}
+
+function chartIsZoomed() {
+  const full = dataBounds(state.points);
+  if (!full) return false;
+  return isZoomed(currentXWindow(), full.min, full.max);
+}
+
+function setXWindow(win) {
+  chartZoom.win = win;
+  // Keep selected point if still meaningful; redraw charts + zoom chip
+  if (cursor.index != null && cursor.index >= state.points.length) {
+    cursor.index = state.points.length - 1;
+  }
+  drawChartsNow();
+  updateChartSub();
+  updateZoomUI();
+}
+
+function resetZoom() {
+  chartZoom.win = null;
+  drawChartsNow();
+  updateChartSub();
+  updateZoomUI();
+}
+
+function updateZoomUI() {
+  const chip = $('#chart-zoom-chip');
+  const btn = $('#btn-reset-zoom');
+  const zoomed = chartIsZoomed();
+  if (chip) {
+    chip.hidden = !zoomed;
+    if (zoomed) chip.textContent = '已放大';
+  }
+  if (btn) {
+    btn.hidden = !zoomed;
+  }
+}
+
+function drawChartsNow() {
+  if (!state.points.length) return;
+  drawAll(
+    $('#canvas-combined'),
+    { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
+    state.points,
+    state.view,
+    state.series,
+    cursor.index,
+    currentXWindow()
+  );
+  updateCursorUI();
+}
 
 function show(view) {
   const map = {
@@ -184,6 +254,8 @@ function ensureCursorBinding() {
     splitCanvases: { t: $('#canvas-t'), h: $('#canvas-h'), p: $('#canvas-p') },
     getPoints: () => state.points,
     getView: () => state.view,
+    getXWindow: () => currentXWindow(),
+    setXWindow: (win) => setXWindow(win),
     onChange: ({ index, pinned }) => {
       cursor.index = index;
       cursor.pinned = pinned;
@@ -194,9 +266,11 @@ function ensureCursorBinding() {
         state.points,
         state.view,
         state.series,
-        empty ? null : index
+        empty ? null : index,
+        currentXWindow()
       );
       updateCursorUI();
+      updateZoomUI();
     },
   });
 
@@ -248,9 +322,19 @@ function renderCharts() {
     cursor.index = state.points.length - 1;
   }
 
+  // Keep zoom only if it still fits the new data range
+  if (!empty && chartZoom.win) {
+    const full = dataBounds(state.points);
+    chartZoom.win = full
+      ? clampWin(chartZoom.win, full.min, full.max, minSpanForPoints(state.points))
+      : null;
+  }
+  if (empty) chartZoom.win = null;
+
   if (empty) {
     $('#chart-readout').hidden = true;
     $('#chart-tooltip').hidden = true;
+    updateZoomUI();
     return;
   }
 
@@ -260,15 +344,24 @@ function renderCharts() {
     state.points,
     state.view,
     state.series,
-    cursor.index
+    cursor.index,
+    currentXWindow()
   );
   updateCursorUI();
+  updateZoomUI();
 }
 
 function updateChartSub() {
   const g = state.granularity;
   const gran = g ? (g.id === 'raw' ? '原始 5 分钟' : g.label || g.id) : '自动粒度';
-  $('#chart-sub').textContent = `${rangeLabel()} · ${gran} · ${state.points.length} 点`;
+  let text = `${rangeLabel()} · ${gran} · ${state.points.length} 点`;
+  const win = currentXWindow();
+  if (win && chartIsZoomed()) {
+    const from = new Date(win.min).toLocaleString();
+    const to = new Date(win.max).toLocaleString();
+    text += ` · 放大 ${from} → ${to}`;
+  }
+  $('#chart-sub').textContent = text;
 }
 
 function fillDeviceSelect() {
@@ -495,6 +588,7 @@ $('#btn-logout')?.addEventListener('click', async () => {
 
 $('#sel-device')?.addEventListener('change', async (e) => {
   state.deviceId = e.target.value;
+  chartZoom.win = null;
   try {
     await refreshSeries();
   } catch (err) {
@@ -507,6 +601,7 @@ $('#sel-range')?.addEventListener('change', async (e) => {
   const custom = state.range === 'custom';
   $('#custom-range').hidden = !custom;
   $('#custom-range').classList.toggle('hidden', !custom);
+  chartZoom.win = null;
   if (!custom) {
     try {
       await refreshSeries();
@@ -526,12 +621,15 @@ $('#btn-apply-range')?.addEventListener('click', async () => {
   state.range = 'custom';
   state.from = new Date(from).toISOString();
   state.to = new Date(to).toISOString();
+  chartZoom.win = null;
   try {
     await refreshSeries();
   } catch (err) {
     toast(err.message, true);
   }
 });
+
+$('#btn-reset-zoom')?.addEventListener('click', () => resetZoom());
 
 $$('.seg').forEach((btn) => {
   btn.addEventListener('click', () => {

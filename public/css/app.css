@@ -471,6 +471,27 @@ canvas {
   flex-wrap: wrap;
 }
 
+.panel-head-right {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.zoom-chip {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(76, 141, 255, 0.18);
+  border: 1px solid rgba(76, 141, 255, 0.4);
+  color: var(--accent);
+  font-size: 0.72rem;
+  font-weight: 600;
+  vertical-align: middle;
+  letter-spacing: 0.02em;
+}
+
 .legend-item {
   display: inline-flex;
   align-items: center;
@@ -517,8 +538,12 @@ canvas {
   height: 360px; /* fallback; JS sets exact inline height */
   display: block;
   max-height: none;
+  /* pan-y: vertical page scroll; custom pinch/pan handled in JS */
   touch-action: pan-y;
   -webkit-tap-highlight-color: transparent;
+  cursor: crosshair;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .chart-split canvas {

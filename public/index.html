@@ -135,36 +135,39 @@
         <section class="chart-panel">
           <header class="panel-head">
             <div>
-              <h2 id="chart-title">温湿度气压</h2>
+              <h2 id="chart-title">温湿度气压 <span id="chart-zoom-chip" class="zoom-chip" hidden>已放大</span></h2>
               <p class="panel-sub" id="chart-sub">默认当天 · 自动粒度</p>
             </div>
-            <div class="legend" id="legend">
-              <button type="button" class="legend-item active" data-series="temperature">
-                <i style="background:var(--temp)"></i>温度
-              </button>
-              <button type="button" class="legend-item active" data-series="humidity">
-                <i style="background:var(--humid)"></i>湿度
-              </button>
-              <button type="button" class="legend-item active" data-series="pressure">
-                <i style="background:var(--press)"></i>气压
-              </button>
+            <div class="panel-head-right">
+              <button type="button" class="btn ghost" id="btn-reset-zoom" hidden title="恢复完整时间范围">重置缩放</button>
+              <div class="legend" id="legend">
+                <button type="button" class="legend-item active" data-series="temperature">
+                  <i style="background:var(--temp)"></i>温度
+                </button>
+                <button type="button" class="legend-item active" data-series="humidity">
+                  <i style="background:var(--humid)"></i>湿度
+                </button>
+                <button type="button" class="legend-item active" data-series="pressure">
+                  <i style="background:var(--press)"></i>气压
+                </button>
+              </div>
             </div>
           </header>
           <div id="chart-combined" class="chart-host">
-            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="悬停查看数据，点击固定，←/→ 微调"></canvas>
+            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="滚轮/双指缩放，拖动平移；悬停查看数据"></canvas>
           </div>
           <div id="chart-split" class="chart-split hidden" hidden>
             <div class="split-item">
               <h3>温度 °C</h3>
-              <canvas id="canvas-t" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
+              <canvas id="canvas-t" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
             </div>
             <div class="split-item">
               <h3>湿度 %RH</h3>
-              <canvas id="canvas-h" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
+              <canvas id="canvas-h" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
             </div>
             <div class="split-item">
               <h3>气压 hPa</h3>
-              <canvas id="canvas-p" width="1000" height="180" title="悬停查看数据，点击固定"></canvas>
+              <canvas id="canvas-p" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
             </div>
           </div>
           <div id="chart-readout" class="chart-readout" hidden>
@@ -181,7 +184,7 @@
           </div>
           <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
           <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
-          <p class="chart-help" id="chart-help">在曲线上点选或悬停可查看该时刻数据；再次点选取消；桌面端可用 ←/→ 微调。</p>
+          <p class="chart-help" id="chart-help">滚轮/双指缩放时间轴；放大后拖动平移。点「重置缩放」恢复全程。</p>
         </section>
 
         <section class="admin-panel hidden" id="admin-panel" hidden>
