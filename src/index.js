@@ -28,7 +28,8 @@ export default {
       res = await handle(req, env, path, method, url);
     } catch (err) {
       console.error('worker_error', err);
-      res = jsonError('服务器内部错误', 500);
+      const detail = err?.message || err?.cause?.message || String(err);
+      res = jsonError('服务器内部错误', 500, { detail });
     }
 
     // Static assets under non-/api paths handled when res is null
