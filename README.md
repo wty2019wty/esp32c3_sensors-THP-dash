@@ -45,7 +45,7 @@ Pages Dash（自建登录会话 Cookie）
 - **首次引导**：`GET/POST /api/auth/bootstrap` 创建第一个 admin
 - **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**
 - **查询** `GET /api/v1/readings`：默认当天，自动降采样
-- **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`；长范围与曲线同一降采样
+- **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`；范围与当前选择一致（单设备）；**先 COUNT，再自动粒度**；超限/SQL 失败时**自动降一档**，不会为导出把长范围原始点整表拉进 Worker；响应头 `x-thp-coarsened=1` 表示已降采样
 - **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板；**光标/点击查看曲线上任一时刻数据**
 
 ## 部署（Cloudflare）

@@ -133,5 +133,19 @@ export async function exportCsv(params) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
-  return filename;
+  const labelRaw = res.headers.get('x-thp-granularity-label') || '';
+  let granularityLabel = '';
+  try {
+    granularityLabel = decodeURIComponent(labelRaw);
+  } catch {
+    granularityLabel = labelRaw;
+  }
+  return {
+    filename,
+    granularity: res.headers.get('x-thp-granularity') || '',
+    granularityLabel,
+    coarsened: res.headers.get('x-thp-coarsened') === '1',
+    pointCount: Number(res.headers.get('x-thp-point-count') || 0),
+    rawCount: Number(res.headers.get('x-thp-raw-count') || 0),
+  };
 }

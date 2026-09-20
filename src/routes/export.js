@@ -38,8 +38,20 @@ export async function exportCsv(env, req) {
       .first();
     if (!device) return jsonError('设备不存在', 404);
 
-    const { gran, points, rawCount } = await loadSeries(env, deviceId, from, to);
+    const { gran, points, rawCount, requestedGran, coarsened, loadError } =
+      await loadSeries(env, deviceId, from, to, {
+        maxOutputRows: MAX_EXPORT_ROWS,
+        autoCoarsen: true,
+      });
 
+    if (loadError) {
+      return jsonError(loadError.message, loadError.status || 500, {
+        ...loadError.extra,
+        limit: loadError.extra?.limit ?? MAX_EXPORT_ROWS,
+        pointCount: loadError.extra?.pointCount ?? points.length,
+        rawCount,
+      });
+    }
     if (points.length > MAX_EXPORT_ROWS) {
       return jsonError(
         `导出行数 ${points.length} 超过上限 ${MAX_EXPORT_ROWS}，请缩短时间范围`,
@@ -56,6 +68,10 @@ export async function exportCsv(env, req) {
     const res = csvResponse(csv, filename);
     res.headers.set('x-thp-granularity', gran.id);
     res.headers.set('x-thp-granularity-label', encodeURIComponent(gran.label));
+    if (requestedGran && requestedGran.id !== gran.id) {
+      res.headers.set('x-thp-requested-granularity', requestedGran.id);
+    }
+    res.headers.set('x-thp-coarsened', coarsened || gran.id !== requestedGran?.id ? '1' : '0');
     res.headers.set('x-thp-point-count', String(points.length));
     res.headers.set('x-thp-raw-count', String(rawCount));
     return res;

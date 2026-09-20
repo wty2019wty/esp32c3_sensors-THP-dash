@@ -32,6 +32,46 @@ export function pickGranularity(fromMs, toMs) {
 
 export const MAX_EXPORT_ROWS = 50000;
 
+/** Max raw rows safe to pull into Worker memory for JS aggregation fallback. */
+export const SAFE_RAW_LOAD_ROWS = 20000;
+
+const BY_SECONDS = [...GRANULARITIES].sort((a, b) => a.seconds - b.seconds);
+
+export function findGranularity(id) {
+  return GRANULARITIES.find((g) => g.id === id) || null;
+}
+
+/** Next coarser step on the ladder (higher bucket seconds), or null if already coarsest. */
+export function nextCoarserGranularity(current) {
+  const curSec = Number(current?.seconds) || 0;
+  return BY_SECONDS.find((g) => g.seconds > curSec) || null;
+}
+
+/** Rough upper bound of buckets for a time span (inclusive + edge slack). */
+export function estimateBucketCount(fromMs, toMs, granSeconds) {
+  if (!granSeconds || granSeconds <= 0) return Infinity;
+  const span = Math.max(toMs - fromMs, 0);
+  return Math.floor(span / (granSeconds * 1000)) + 3;
+}
+
+/**
+ * Pick a granularity whose estimated output rows fit maxRows.
+ * Walks the ladder coarser when needed; returns the coarsest step if still over.
+ */
+export function pickGranularityForLimit(fromMs, toMs, rawCount, maxRows = MAX_EXPORT_ROWS) {
+  let gran = pickGranularity(fromMs, toMs);
+  const limit = maxRows == null ? Infinity : maxRows;
+  for (;;) {
+    const est = gran.sql
+      ? Math.min(rawCount, estimateBucketCount(fromMs, toMs, gran.seconds))
+      : rawCount;
+    if (limit === Infinity || est <= limit) return gran;
+    const coarser = nextCoarserGranularity(gran);
+    if (!coarser) return gran;
+    gran = coarser;
+  }
+}
+
 /**
  * Bucket ISO timestamp down to granularity start (UTC).
  * @param {string} ts ISO string

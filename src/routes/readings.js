@@ -12,9 +12,12 @@ import {
 import { requireSessionAction } from './auth.js';
 import {
   pickGranularity,
+  pickGranularityForLimit,
+  nextCoarserGranularity,
   aggregateRows,
   round3,
   sqlBucketStartExpr,
+  SAFE_RAW_LOAD_ROWS,
 } from '../lib/downsample.js';
 
 function resolveDisplayTz(env) {
@@ -113,13 +116,28 @@ export async function ingestReading(env, req) {
 }
 
 /**
- * Load series for charts/CSV. Downsample in SQL when gran.sql is set;
- * fall back to JS aggregation if the D1 SQL dialect rejects the expression.
+ * Load series for charts/CSV.
+ * Strategy: COUNT first → pick granularity (optional auto-coarsen for row limits)
+ * → SQL downsample; JS-aggregate only when rawCount is small enough to load safely.
+ * Never pulls huge raw result sets into the Worker just because SQL aggregation failed.
+ *
+ * @param {object} env
+ * @param {string} deviceId
+ * @param {string} fromIso
+ * @param {string} toIso
+ * @param {{ maxOutputRows?: number, autoCoarsen?: boolean, safeRawLoad?: number }} [opts]
+ * @returns {Promise<{gran: object, points: Array, rawCount: number, requestedGran: object, coarsened: boolean, loadError?: {message: string, status: number, extra?: object}}>}
  */
-export async function loadSeries(env, deviceId, fromIso, toIso) {
+export async function loadSeries(env, deviceId, fromIso, toIso, opts = {}) {
+  const {
+    maxOutputRows = Infinity,
+    autoCoarsen = false,
+    safeRawLoad = SAFE_RAW_LOAD_ROWS,
+  } = opts;
+
   const fromMs = Date.parse(fromIso);
   const toMs = Date.parse(toIso);
-  const gran = pickGranularity(fromMs, toMs);
+  const requestedGran = pickGranularity(fromMs, toMs);
 
   const rawSelect = `SELECT ts, temperature, humidity, pressure
      FROM readings
@@ -134,17 +152,38 @@ export async function loadSeries(env, deviceId, fromIso, toIso) {
       pressure: r.pressure,
     }));
 
-  if (!gran.sql) {
+  const countRow = await env.DB.prepare(
+    `SELECT COUNT(*) AS c FROM readings WHERE device_id = ? AND ts >= ? AND ts <= ?`
+  )
+    .bind(deviceId, fromIso, toIso)
+    .first();
+  const rawCount = Number(countRow?.c || 0);
+
+  let gran = requestedGran;
+  if (autoCoarsen) {
+    gran = pickGranularityForLimit(fromMs, toMs, rawCount, maxOutputRows);
+  }
+
+  const fail = (message, status, extra) => ({
+    gran,
+    requestedGran,
+    coarsened: gran.id !== requestedGran.id,
+    points: [],
+    rawCount,
+    loadError: { message, status, extra: extra || {} },
+  });
+
+  const loadRaw = async () => {
     const { results } = await env.DB.prepare(rawSelect)
       .bind(deviceId, fromIso, toIso)
       .all();
-    const points = mapRaw(results);
-    return { gran, points, rawCount: points.length };
-  }
+    return mapRaw(results);
+  };
 
-  const bucketExpr = sqlBucketStartExpr(gran.seconds);
-  // GROUP BY 1 — do not GROUP BY ts (SQLite prefers the base column over the alias)
-  const aggSql = `SELECT ${bucketExpr} AS ts,
+  const sqlAgg = async (g) => {
+    const bucketExpr = sqlBucketStartExpr(g.seconds);
+    // GROUP BY 1 — do not GROUP BY ts (SQLite prefers the base column over the alias)
+    const aggSql = `SELECT ${bucketExpr} AS ts,
             AVG(temperature) AS temperature,
             AVG(humidity) AS humidity,
             AVG(pressure) AS pressure
@@ -152,36 +191,115 @@ export async function loadSeries(env, deviceId, fromIso, toIso) {
      WHERE device_id = ? AND ts >= ? AND ts <= ?
      GROUP BY 1
      ORDER BY 1`;
-
-  let points;
-  let rawCount = 0;
-  try {
-    const [{ results }, countRow] = await Promise.all([
-      env.DB.prepare(aggSql).bind(deviceId, fromIso, toIso).all(),
-      env.DB.prepare(
-        `SELECT COUNT(*) AS c FROM readings WHERE device_id = ? AND ts >= ? AND ts <= ?`
-      )
-        .bind(deviceId, fromIso, toIso)
-        .first(),
-    ]);
-    rawCount = Number(countRow?.c || 0);
-    points = (results || []).map((r) => ({
+    const { results } = await env.DB.prepare(aggSql).bind(deviceId, fromIso, toIso).all();
+    return (results || []).map((r) => ({
       ts: r.ts,
       temperature: round3(r.temperature),
       humidity: round3(r.humidity),
       pressure: round3(r.pressure),
     }));
-  } catch (err) {
-    console.warn('sql_downsample_failed', err);
-    const { results } = await env.DB.prepare(rawSelect)
-      .bind(deviceId, fromIso, toIso)
-      .all();
-    const rows = mapRaw(results);
-    rawCount = rows.length;
-    points = aggregateRows(rows, gran.seconds);
+  };
+
+  const ok = (g, points) => ({
+    gran: g,
+    requestedGran,
+    coarsened: g.id !== requestedGran.id,
+    points,
+    rawCount,
+  });
+
+  // Raw path (≤24h): refuse huge raw pulls; optionally step to SQL buckets.
+  if (!gran.sql) {
+    const exceedsOutput = maxOutputRows !== Infinity && rawCount > maxOutputRows;
+    const exceedsSafeLoad = rawCount > safeRawLoad;
+    if (exceedsOutput || exceedsSafeLoad) {
+      if (!autoCoarsen) {
+        return fail(
+          exceedsOutput
+            ? `原始点 ${rawCount} 超过上限 ${maxOutputRows}，请缩短时间范围`
+            : `范围内原始点 ${rawCount} 过多，请缩短时间范围`,
+          413,
+          { limit: exceedsOutput ? maxOutputRows : safeRawLoad, pointCount: rawCount }
+        );
+      }
+      const coarser = nextCoarserGranularity(gran);
+      if (!coarser) {
+        return fail(`原始点 ${rawCount} 超过上限，且无法再降采样`, 413, {
+          limit: maxOutputRows,
+          pointCount: rawCount,
+        });
+      }
+      gran = pickGranularityForLimit(fromMs, toMs, rawCount, maxOutputRows);
+      if (!gran.sql) gran = coarser;
+    }
   }
 
-  return { gran, points, rawCount };
+  // Still raw after possible coarsen step.
+  if (!gran.sql) {
+    if (rawCount > safeRawLoad) {
+      return fail(`范围内原始点 ${rawCount} 过多，请缩短时间范围`, 413, {
+        limit: safeRawLoad,
+        pointCount: rawCount,
+      });
+    }
+    const rows = rawCount === 0 ? [] : await loadRaw();
+    return ok(gran, rows);
+  }
+
+  // SQL downsample path — coarsen on failure or overflow; never bulk-load huge raw.
+  let attempt = gran;
+  const tried = new Set();
+  for (;;) {
+    tried.add(attempt.id);
+    let points = null;
+    let resolved = false;
+
+    try {
+      points = await sqlAgg(attempt);
+      resolved = true;
+    } catch (err) {
+      console.warn('sql_downsample_failed', err?.message || err, 'gran=', attempt.id);
+      if (rawCount === 0) {
+        points = [];
+        resolved = true;
+      } else if (rawCount <= safeRawLoad) {
+        const rows = await loadRaw();
+        points = aggregateRows(rows, attempt.seconds);
+        resolved = true;
+      }
+      // else: too many raw rows — try coarser SQL, do not .all() the range
+    }
+
+    if (resolved) {
+      const over =
+        maxOutputRows !== Infinity &&
+        points.length > maxOutputRows &&
+        rawCount > 0;
+      if (over && autoCoarsen) {
+        const coarser = nextCoarserGranularity(attempt);
+        if (coarser && !tried.has(coarser.id)) {
+          attempt = coarser;
+          continue;
+        }
+        return fail(
+          `导出行数 ${points.length} 超过上限 ${maxOutputRows}，请缩短时间范围`,
+          413,
+          { limit: maxOutputRows, pointCount: points.length, granularity: attempt.id }
+        );
+      }
+      return ok(attempt, points);
+    }
+
+    const coarser = nextCoarserGranularity(attempt);
+    if (!coarser || tried.has(coarser.id)) {
+      return fail(
+        '降采样查询失败，且原始数据量过大无法安全聚合，请缩短时间范围',
+        503,
+        { granularity: attempt.id, rawCount }
+      );
+    }
+    attempt = coarser;
+  }
 }
 
 export async function queryReadings(env, req) {
@@ -208,7 +326,15 @@ export async function queryReadings(env, req) {
       .first();
     if (!device) return jsonError('设备不存在', 404);
 
-    const { gran, points, rawCount } = await loadSeries(env, deviceId, from, to);
+    const series = await loadSeries(env, deviceId, from, to, {
+      // Charts share the same safety rails; no hard export cap, but coarsen if SQL/raw would blow up.
+      maxOutputRows: Infinity,
+      autoCoarsen: true,
+    });
+    if (series.loadError) {
+      return jsonError(series.loadError.message, series.loadError.status || 500, series.loadError.extra || {});
+    }
+    const { gran, points, rawCount } = series;
 
     let latest = null;
     const last = await env.DB.prepare(

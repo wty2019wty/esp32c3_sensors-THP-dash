@@ -896,8 +896,18 @@ $('#btn-export')?.addEventListener('click', async () => {
   }
   const { from, to } = rangeToFromTo();
   try {
-    const name = await exportCsv({ device_id: state.deviceId, from, to });
-    toast(`已导出 ${name || 'CSV'}`);
+    const result = await exportCsv({ device_id: state.deviceId, from, to });
+    if (result && typeof result === 'object') {
+      const name = result.filename || 'CSV';
+      if (result.coarsened) {
+        const g = result.granularityLabel || result.granularity || '更粗粒度';
+        toast(`已导出 ${name}（长范围/数据量大，已降采样为 ${g}）`);
+      } else {
+        toast(`已导出 ${name}`);
+      }
+    } else {
+      toast(`已导出 ${result || 'CSV'}`);
+    }
   } catch (err) {
     toast(err.message || '导出失败', true);
   }
