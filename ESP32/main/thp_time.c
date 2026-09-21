@@ -217,6 +217,8 @@ bool thp_time_sync_before_report(void)
     if (err == ESP_ERR_NOT_FINISHED) {
         /* 同步进行中：不得把 SYNC_BIT 当成功；已有可信时间则沿用 */
         if (had_sync && now > 1600000000) {
+            /* 本周期已真正 sync_wait 过；复位 skip，避免下一周期立刻再打 20s */
+            s_sync_skip_count = 0;
             ESP_LOGW(TAG, "上报前 NTP 仍在同步中，沿用已有系统时间");
             return true;
         }
@@ -227,6 +229,8 @@ bool thp_time_sync_before_report(void)
     if (had_sync && now > 1600000000) {
         char iso[ISO_UTC_BUF_LEN];
         thp_time_format_iso(iso);
+        /* 失败也复位 skip：等价于「失败一次，再隔 RESYNC 周期才重试」 */
+        s_sync_skip_count = 0;
         ESP_LOGW(TAG, "上报前 NTP 超时(%s)，沿用已有系统时间 UTC=%s",
                  esp_err_to_name(err), iso[0] ? iso : "(n/a)");
         return true;

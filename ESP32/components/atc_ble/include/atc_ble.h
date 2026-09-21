@@ -32,9 +32,8 @@ void atc_ble_window_close(void);
 /** 取窗口内 |ts-ref| 最小的一帧；无样本返回 false */
 bool atc_ble_pop_window_best(int64_t ref_ms, atc_ble_sample_t *out);
 
-esp_err_t atc_ble_start_scan(void);
 esp_err_t atc_ble_stop_scan(void);
-/** HTTP 后恢复：仅当窗口仍打开时续扫，不会造成窗口外持续扫描 */
+/** HTTP 后恢复：窗口仍打开且墙钟未过 close 才续扫 */
 esp_err_t atc_ble_resume_scan_if_wanted(void);
 bool      atc_ble_pop_latest(atc_ble_sample_t *out);
 void      atc_ble_clear_cache(void);

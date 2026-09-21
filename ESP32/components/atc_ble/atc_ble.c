@@ -409,12 +409,39 @@ static void start_scan_locked(void)
     }
 }
 
+/** 窗口逻辑截止：墙钟超过 close_ms 即停扫（数据面 ring 仍可被 pop） */
+static bool window_expired_by_wallclock(void)
+{
+    if (!s_window_active) {
+        return false;
+    }
+    return (esp_timer_get_time() / 1000) > s_window_close_ms;
+}
+
+/** 到点后关窗停扫；幂等，sched / resume / scan_sup 均可调用 */
+static void window_expire_if_due(void)
+{
+    if (!window_expired_by_wallclock()) {
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    s_window_active = false;
+    portEXIT_CRITICAL(&s_lock);
+    s_scan_wanted = false;
+    if (s_scanning) {
+        ble_gap_disc_cancel();
+        s_scanning = false;
+        ESP_LOGD(TAG, "ATC BLE 窗口墙钟到点，扫描停止");
+    }
+}
+
 /** 独立任务负责启停扫描，避免在 NimBLE 回调里调 GAP API；仅窗口内续扫 */
 static void scan_sup_task(void *arg)
 {
     (void)arg;
     int beat = 0;
     for (;;) {
+        window_expire_if_due();
         if (s_inited && s_synced && s_scan_wanted && !s_scanning) {
             start_scan_locked();
         }
@@ -601,19 +628,6 @@ bool atc_ble_pop_window_best(int64_t ref_ms, atc_ble_sample_t *out)
     return true;
 }
 
-esp_err_t atc_ble_start_scan(void)
-{
-    if (!s_inited) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    s_scan_wanted = true;
-    if (!s_synced) {
-        return ESP_OK; /* sup 任务会在 sync 后启动 */
-    }
-    start_scan_locked();
-    return ESP_OK;
-}
-
 esp_err_t atc_ble_stop_scan(void)
 {
     if (!s_inited) {
@@ -629,13 +643,17 @@ esp_err_t atc_ble_stop_scan(void)
     return ESP_OK;
 }
 
-/** HTTP 后恢复：仅当本周期仍处于扫描窗口时续扫 */
+/** HTTP 后恢复：仅当本周期窗口仍打开且墙钟未过 close 时续扫 */
 esp_err_t atc_ble_resume_scan_if_wanted(void)
 {
     if (!s_inited) {
         return ESP_OK;
     }
     if (!s_window_active) {
+        return ESP_OK;
+    }
+    if (window_expired_by_wallclock()) {
+        window_expire_if_due();
         return ESP_OK;
     }
     s_scan_wanted = true;

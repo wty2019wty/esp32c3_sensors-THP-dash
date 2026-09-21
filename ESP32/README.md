@@ -60,7 +60,7 @@ ESP32/
 | 阶段 | 时刻 | 行为 |
 | --- | --- | --- |
 | 0. 开 BLE 窗 | T−5s | `thp_mi_scan_window_open`（仅窗口内扫描，默认不持续扫） |
-| 1. 校时 | T | Wi-Fi 可用时 SNTP；已同步则短路，每 `THP_NTP_RESYNC_EVERY_CYCLES` 个周期才真正重同步 |
+| 1. 校时 | T | Wi-Fi 可用时 SNTP；已同步则短路，每 `THP_NTP_RESYNC_EVERY_CYCLES` 个周期才真正重同步；重同步失败/超时会复位 skip，避免每周期空耗 timeout |
 | 2. LOCAL | T | I2C 采样 → Token A 上报或入离线队列 |
 | 3. 等窗 + MI | T+10s | 等到关窗 → 取距 T 最近帧 → Token B 上报或入队；关 BLE 窗 |
 | 4. 补传 | MI 之后 | 最多 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE` 条历史；剩余预算 &lt; 10s 则跳过 |
