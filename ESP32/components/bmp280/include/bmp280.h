@@ -20,14 +20,21 @@
 #define BMP280_REG_CHIP_ID          0xD0
 #define BMP280_REG_RESET            0xE0
 #define BMP280_REG_CALIB            0x88
+#define BMP280_REG_STATUS           0xF3
 #define BMP280_REG_CTRL_MEAS        0xF4
 #define BMP280_REG_CONFIG           0xF5
 #define BMP280_REG_PRESS_MSB        0xF7
 #define BMP280_REG_DATA_LEN         6
 #define BMP280_CHIP_ID              0x58
 #define BMP280_CALIB_LEN            26
-#define BMP280_CTRL_MEAS_NORMAL     0x57
-#define BMP280_CONFIG_DEFAULT       0x00
+#define BMP280_STATUS_MEASURING     0x08
+/* osrs_t=x2, osrs_p=x16, mode=forced — 按需测量，降低 continuous 自热 */
+#define BMP280_CTRL_MEAS_SLEEP      0x00
+#define BMP280_CTRL_MEAS_FORCED     0x55
+/* IIR filter coefficient 4（气压） */
+#define BMP280_CONFIG_FILTER4       0x0C
+#define BMP280_FORCED_POLL_MS       5
+#define BMP280_FORCED_TIMEOUT_MS    80
 #define BMP280_SEA_LEVEL_PA         101325.0f
 #define BMP280_ALT_EXPONENT         0.1903f
 #define BMP280_PA_PER_HPA           100.0f

@@ -23,6 +23,24 @@ static i2c_master_bus_handle_t s_bus;
 static sht40_t s_sht;
 static bmp280_t s_bmp;
 
+#define THP_SENSOR_MEDIAN_N     5
+#define THP_SENSOR_BMP_SAMPLES  3
+#define THP_SENSOR_INTER_SAMPLE_MS 20
+
+static float median_f(float *v, int n)
+{
+    for (int i = 1; i < n; i++) {
+        float key = v[i];
+        int j = i - 1;
+        while (j >= 0 && v[j] > key) {
+            v[j + 1] = v[j];
+            j--;
+        }
+        v[j + 1] = key;
+    }
+    return v[n / 2];
+}
+
 static void i2c_lines_selftest(void)
 {
     gpio_config_t cfg = {
@@ -118,19 +136,79 @@ bool thp_sensors_sample(thp_sample_t *out)
     sensors_retry_init_if_missing();
 
     float sht_t = 0.0f, sht_h = 0.0f;
-    float bmp_t = 0.0f, bmp_p = 0.0f, bmp_alt = 0.0f;
-    int32_t t_fine = 0;
+    float bmp_p = 0.0f;
 
-    bool sht_ok = s_sht.present && (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
-    bool bmp_ok = s_bmp.present && (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_alt, &t_fine) == ESP_OK);
+    float ts[THP_SENSOR_MEDIAN_N];
+    float hs[THP_SENSOR_MEDIAN_N];
+    float ps[THP_SENSOR_BMP_SAMPLES];
+    int nt = 0, np = 0;
+
+    bool sht_ok = false;
+    if (s_sht.present) {
+        for (int i = 0; i < THP_SENSOR_MEDIAN_N; i++) {
+            float t = 0.0f, h = 0.0f;
+            if (sht40_read(&s_sht, &t, &h) == ESP_OK) {
+                ts[nt] = t;
+                hs[nt] = h;
+                nt++;
+            }
+            if (i + 1 < THP_SENSOR_MEDIAN_N) {
+                vTaskDelay(pdMS_TO_TICKS(THP_SENSOR_INTER_SAMPLE_MS));
+            }
+        }
+        if (nt > 0) {
+            sht_t = median_f(ts, nt);
+            sht_h = median_f(hs, nt);
+            sht_ok = true;
+        }
+    }
+
+    bool bmp_ok = false;
+    if (s_bmp.present) {
+        for (int i = 0; i < THP_SENSOR_BMP_SAMPLES; i++) {
+            float bt = 0.0f, bp = 0.0f, balt = 0.0f;
+            if (bmp280_read(&s_bmp, &bt, &bp, &balt, NULL) == ESP_OK) {
+                ps[np] = bp;
+                np++;
+            }
+        }
+        if (np > 0) {
+            bmp_p = median_f(ps, np);
+            bmp_ok = true;
+        }
+    }
 
     if (!sht_ok || !bmp_ok) {
         (void)i2c_master_bus_reset(s_bus);
-        if (!sht_ok) {
-            sht_ok = s_sht.present && (sht40_read(&s_sht, &sht_t, &sht_h) == ESP_OK);
+        if (!sht_ok && s_sht.present) {
+            nt = 0;
+            for (int i = 0; i < THP_SENSOR_MEDIAN_N; i++) {
+                float t = 0.0f, h = 0.0f;
+                if (sht40_read(&s_sht, &t, &h) == ESP_OK) {
+                    ts[nt] = t;
+                    hs[nt] = h;
+                    nt++;
+                }
+            }
+            if (nt > 0) {
+                sht_t = median_f(ts, nt);
+                sht_h = median_f(hs, nt);
+                sht_ok = true;
+            }
         }
-        if (!bmp_ok) {
-            bmp_ok = s_bmp.present && (bmp280_read(&s_bmp, &bmp_t, &bmp_p, &bmp_alt, &t_fine) == ESP_OK);
+        if (!bmp_ok && s_bmp.present) {
+            np = 0;
+            for (int i = 0; i < THP_SENSOR_BMP_SAMPLES; i++) {
+                float bt = 0.0f, bp = 0.0f, balt = 0.0f;
+                if (bmp280_read(&s_bmp, &bt, &bp, &balt, NULL) == ESP_OK) {
+                    ps[np] = bp;
+                    np++;
+                }
+            }
+            if (np > 0) {
+                bmp_p = median_f(ps, np);
+                bmp_ok = true;
+            }
         }
     }
 
@@ -153,15 +231,16 @@ bool thp_sensors_sample(thp_sample_t *out)
     out->valid = out->has_th || out->has_p;
 
     if (!out->valid) {
-        ESP_LOGW(TAG, "采样无有效字段: SHT40=%s BMP280=%s present(th=%d p=%d)",
+        ESP_LOGW(TAG, "采样无有效字段: SHT40=%s BMP280=%s present(th=%d p=%d) n_th=%d n_p=%d",
                  sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL",
-                 s_sht.present, s_bmp.present);
+                 s_sht.present, s_bmp.present, nt, np);
         return false;
     }
 
-    if (!sht_ok || !bmp_ok) {
-        ESP_LOGW(TAG, "部分采样: SHT40=%s BMP280=%s → 上报%s%s",
-                 sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL",
+    if (!sht_ok || !bmp_ok || nt < THP_SENSOR_MEDIAN_N || np < THP_SENSOR_BMP_SAMPLES) {
+        ESP_LOGW(TAG, "采样: SHT40=%s(%d/%d) BMP280=%s(%d/%d) → 上报%s%s",
+                 sht_ok ? "OK" : "FAIL", nt, THP_SENSOR_MEDIAN_N,
+                 bmp_ok ? "OK" : "FAIL", np, THP_SENSOR_BMP_SAMPLES,
                  out->has_th ? " 温湿度" : "", out->has_p ? " 气压" : "");
     }
     return true;

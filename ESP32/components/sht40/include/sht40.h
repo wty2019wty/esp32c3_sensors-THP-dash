@@ -17,7 +17,10 @@
 #define SHT40_I2C_ADDR              0x44
 #define SHT40_I2C_ADDR_ALT          0x45
 #define SHT40_CMD_MEASURE_HIGH_PREC 0xFD
-#define SHT40_MEASURE_DELAY_MS      10
+#define SHT40_CMD_SOFT_RESET        0x94
+/* high precision max tMEAS = 8.2ms；不支持 clock-stretch，留裕量 */
+#define SHT40_MEASURE_DELAY_MS      20
+#define SHT40_RESET_DELAY_MS        2
 #define SHT40_CRC_POLY              0x31
 #define SHT40_CRC_INIT              0xFF
 #define SHT40_RAW_BYTES             6

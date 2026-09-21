@@ -52,6 +52,14 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_spe
             return err;
         }
 
+        uint8_t rst = SHT40_CMD_SOFT_RESET;
+        err = i2c_master_transmit(sht->dev, &rst, 1, SHT40_I2C_TIMEOUT_MS);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "SHT40 软复位失败: %s", esp_err_to_name(err));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(SHT40_RESET_DELAY_MS));
+        }
+
         sht->present = true;
         ESP_LOGI(TAG, "SHT40 初始化成功 (0x%02X)", addrs[i]);
         return ESP_OK;

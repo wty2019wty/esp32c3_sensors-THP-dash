@@ -11,6 +11,8 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 static const char *TAG = "bmp280";
 
@@ -112,19 +114,21 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     }
     bmp280_parse_calib(bmp, calib);
 
-    err = bmp280_write_reg(bmp, BMP280_REG_CONFIG, BMP280_CONFIG_DEFAULT);
+    /* CONFIG 仅在 sleep 下可写；先 sleep，再滤波，读时 forced */
+    err = bmp280_write_reg(bmp, BMP280_REG_CTRL_MEAS, BMP280_CTRL_MEAS_SLEEP);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "写入 CTRL_MEAS(sleep) 失败: %s", esp_err_to_name(err));
+        return err;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+    err = bmp280_write_reg(bmp, BMP280_REG_CONFIG, BMP280_CONFIG_FILTER4);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "写入 CONFIG 失败: %s", esp_err_to_name(err));
         return err;
     }
-    err = bmp280_write_reg(bmp, BMP280_REG_CTRL_MEAS, BMP280_CTRL_MEAS_NORMAL);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "写入 CTRL_MEAS 失败: %s", esp_err_to_name(err));
-        return err;
-    }
 
     bmp->present = true;
-    ESP_LOGI(TAG, "BMP280 初始化成功 (0x%02X), WHOAMI=0x%02X", chosen, chip_id);
+    ESP_LOGI(TAG, "BMP280 初始化成功 (0x%02X), WHOAMI=0x%02X, forced+IIR4", chosen, chip_id);
     return ESP_OK;
 }
 
@@ -137,8 +141,35 @@ esp_err_t bmp280_read(bmp280_t *bmp, float *temp_c, float *press_hpa, float *alt
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t err = bmp280_write_reg(bmp, BMP280_REG_CTRL_MEAS, BMP280_CTRL_MEAS_FORCED);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "触发 forced 测量失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* 等 measuring 位置位后再清零，避免刚触发就读到旧数据 */
+    vTaskDelay(pdMS_TO_TICKS(10));
+    int waited = 10;
+    while (waited <= BMP280_FORCED_TIMEOUT_MS) {
+        uint8_t st = 0;
+        err = bmp280_read_regs(bmp, BMP280_REG_STATUS, &st, 1);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "读取 STATUS 失败: %s", esp_err_to_name(err));
+            return err;
+        }
+        if ((st & BMP280_STATUS_MEASURING) == 0) {
+            break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(BMP280_FORCED_POLL_MS));
+        waited += BMP280_FORCED_POLL_MS;
+    }
+    if (waited > BMP280_FORCED_TIMEOUT_MS) {
+        ESP_LOGE(TAG, "forced 测量超时");
+        return ESP_ERR_TIMEOUT;
+    }
+
     uint8_t d[BMP280_REG_DATA_LEN] = {0};
-    esp_err_t err = bmp280_read_regs(bmp, BMP280_REG_PRESS_MSB, d, sizeof(d));
+    err = bmp280_read_regs(bmp, BMP280_REG_PRESS_MSB, d, sizeof(d));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "读取测量数据失败: %s", esp_err_to_name(err));
         return err;
