@@ -20,6 +20,9 @@ bool thp_mi_is_ready(void);
 /** 在 T-5s 调用：开启扫描窗口并停在扫描态（直到 window_close） */
 void thp_mi_scan_window_open(int64_t cycle_ref_ms);
 
+/** 周期实际起点确定后调用：窗边界对齐到与取帧相同的 cycle_ref_ms */
+void thp_mi_scan_window_realign(int64_t cycle_ref_ms);
+
 /** 周期采集结束后调用：关窗并停扫（窗口外不扫描） */
 void thp_mi_scan_window_close(void);
 

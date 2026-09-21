@@ -104,6 +104,14 @@ void thp_mi_scan_window_open(int64_t cycle_ref_ms)
                         THP_MI_SCAN_CLOSE_AFTER_MS);
 }
 
+void thp_mi_scan_window_realign(int64_t cycle_ref_ms)
+{
+    if (!s_mi_ready) {
+        return;
+    }
+    atc_ble_window_realign(cycle_ref_ms);
+}
+
 void thp_mi_scan_window_close(void)
 {
     if (!s_mi_ready) {
@@ -184,6 +192,11 @@ bool thp_mi_is_ready(void)
 }
 
 void thp_mi_scan_window_open(int64_t cycle_ref_ms)
+{
+    (void)cycle_ref_ms;
+}
+
+void thp_mi_scan_window_realign(int64_t cycle_ref_ms)
 {
     (void)cycle_ref_ms;
 }

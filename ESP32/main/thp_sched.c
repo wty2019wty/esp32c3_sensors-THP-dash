@@ -108,8 +108,10 @@ static void run_one_cycle(unsigned cycle_no, TickType_t cycle_start_tick)
 {
     TickType_t deadline = cycle_deadline(cycle_start_tick);
     TickType_t period_ticks = pdMS_TO_TICKS(THP_REPORT_PERIOD_MS);
-    /* 窗口已在 T-5s 打开；此处仅以真实 T 作为取帧参考，不再 window_open */
+    /* 开窗用的 est_ref 可能与真实 T 偏差 >1s（sleep 过冲/重对齐）；
+     * 此处以真实 T 重算窗边界，与后面 pop_window_best 共用同一 ref */
     int64_t cycle_ref_ms = esp_timer_get_time() / 1000;
+    thp_mi_scan_window_realign(cycle_ref_ms);
 
     thp_report_new_cycle();
 
