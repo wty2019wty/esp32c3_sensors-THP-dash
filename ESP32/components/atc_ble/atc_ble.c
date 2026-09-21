@@ -58,6 +58,8 @@ static volatile size_t s_win_head;
 static volatile bool s_window_active;
 static volatile int64_t s_window_open_ms;
 static volatile int64_t s_window_close_ms;
+static int64_t s_window_open_before_ms;
+static int64_t s_window_close_after_ms;
 
 static int gap_on_event(struct ble_gap_event *event, void *arg);
 static void start_scan_locked(void);
@@ -557,6 +559,8 @@ void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_a
     s_win_head = 0;
     s_win_count = 0;
     memset((void *)s_win_ring, 0, sizeof(s_win_ring));
+    s_window_open_before_ms = open_before_ms;
+    s_window_close_after_ms = close_after_ms;
     s_window_open_ms = open_ms;
     s_window_close_ms = close_ms;
     s_window_active = true;
@@ -568,6 +572,32 @@ void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_a
              (long long)open_before_ms, (long long)close_after_ms);
     if (s_synced) {
         start_scan_locked();
+    }
+}
+
+void atc_ble_window_realign(int64_t ref_ms)
+{
+    if (!s_inited) {
+        return;
+    }
+    portENTER_CRITICAL(&s_lock);
+    if (!s_window_active) {
+        portEXIT_CRITICAL(&s_lock);
+        return;
+    }
+    const int64_t old_open = s_window_open_ms;
+    const int64_t old_close = s_window_close_ms;
+    s_window_open_ms = ref_ms - s_window_open_before_ms;
+    s_window_close_ms = ref_ms + s_window_close_after_ms;
+    const int64_t new_open = s_window_open_ms;
+    const int64_t new_close = s_window_close_ms;
+    portEXIT_CRITICAL(&s_lock);
+
+    if (old_open != new_open || old_close != new_close) {
+        ESP_LOGI(TAG, "ATC BLE 窗口重对齐 ref=%lld open %lld→%lld close %lld→%lld",
+                 (long long)ref_ms,
+                 (long long)old_open, (long long)new_open,
+                 (long long)old_close, (long long)new_close);
     }
 }
 

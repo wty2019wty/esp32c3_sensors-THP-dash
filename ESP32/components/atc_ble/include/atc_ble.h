@@ -27,6 +27,8 @@ esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16]);
 
 /** 窗口扫描：仅在 [ref-open, ref+close] 帧才会进入窗口环形缓存 */
 void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_after_ms);
+/** 周期实际 T 与开窗估算偏差时，按同一 ref 重算窗边界；不清环缓存、不改扫描态 */
+void atc_ble_window_realign(int64_t ref_ms);
 /** 关闭窗口并停扫（窗口外不扫描） */
 void atc_ble_window_close(void);
 /** 取窗口内 |ts-ref| 最小的一帧；无样本返回 false */
