@@ -1,0 +1,280 @@
+# THP Dash — ESPHome 设备端
+# SHT40 + BMP280（LOCAL）+ 小米计 BLE（MI/BTHome）→ HTTPS POST 到 Cloudflare Worker
+#
+# 与 ESP32/ 自研固件的差异（有意简化，不做离线补传/扫描窗对齐）：
+#   - 周期到点取当前缓存读数上报；MI 取最近一帧 BLE 广播
+#   - 失败不重试、不入队（下一周期再报）
+#   - 加密小米计请用 BTHome v2 广播（官方推荐）；pvvx Custom 加密 AtcMiCodec 不在 ESPHome 内置组件内
+#
+# 密钥/Token 全部放 secrets.yaml（勿提交）
+
+substitutions:
+  device_name: thp-sensors
+  report_interval: 5min
+  # MI 相对 LOCAL 错开，避免同一主循环内两次 HTTPS 叠卡
+  mi_offset: 25s
+  local_device_id: ESP32-C3
+  mi_device_id: xiaomi_room
+
+esphome:
+  name: ${device_name}
+  on_boot:
+    priority: -100
+    then:
+      - logger.log: "THP ESPHome 就绪：周期 ${report_interval}，MI 错开 ${mi_offset}"
+      # 给 Wi-Fi / I2C / 首帧 BLE 留时间后再报一轮；LOCAL / MI 错开
+      - delay: 12s
+      - script.execute: report_local
+      - delay: ${mi_offset}
+      - script.execute: report_mi
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+    version: recommended
+  flash_size: 4MB
+  cpu_frequency: 160MHz
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret ota_encryption_key
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # Super Mini 天线一般，降低功耗保存模式可提高稳定性
+  power_save_mode: NONE
+  ap:
+    ssid: "${device_name}-setup"
+    password: !secret ap_password
+
+captive_portal:
+
+# ---------------- 时间（measured_at 用 UTC） ----------------
+time:
+  - platform: sntp
+    id: thp_time
+    timezone: UTC
+    servers:
+      - ntp.aliyun.com
+      - cn.pool.ntp.org
+      - ntp.ntsc.ac.cn
+
+# ---------------- I2C：SDA=GPIO8 SCL=GPIO9（与 ESP32/ 一致） ----------------
+i2c:
+  sda: 8
+  scl: 9
+  scan: true
+  frequency: 50kHz
+
+# ---------------- 本机传感器 ----------------
+sensor:
+  # Wi-Fi RSSI（上报 rssi）
+  - platform: wifi_signal
+    name: "WiFi RSSI"
+    id: wifi_rssi
+    update_interval: 60s
+    entity_category: diagnostic
+
+  # SHT40 → temperature / humidity（唯一温湿度口径）
+  - platform: sht4x
+    id: sht40_bus
+    address: 0x44
+    precision: High
+    update_interval: 30s
+    temperature:
+      name: "SHT40 Temperature"
+      id: sht_temp
+      unit_of_measurement: "°C"
+      accuracy_decimals: 2
+    humidity:
+      name: "SHT40 Humidity"
+      id: sht_hum
+      unit_of_measurement: "%"
+      accuracy_decimals: 2
+
+  # BMP280 → 仅 pressure 入库（内部温度不进业务字段）
+  - platform: bmp280_i2c
+    id: bmp280_bus
+    address: 0x76
+    update_interval: 30s
+    temperature:
+      name: "BMP280 Temperature (internal)"
+      id: bmp_temp
+      oversampling: 16x
+      entity_category: diagnostic
+    pressure:
+      name: "BMP280 Pressure"
+      id: bmp_pressure
+      oversampling: 16x
+      unit_of_measurement: "hPa"
+      accuracy_decimals: 2
+
+  # 小米计 LYWSD03MMC / pvvx → BTHome v2（加密用 bindkey）
+  # 若表头刷的是 ATC1441 明文，可改用 platform: atc_mithermometer（无 bindkey）
+  - platform: bthome_mithermometer
+    id: mi
+    mac_address: !secret thp_mi_mac
+    bindkey: !secret thp_mi_bindkey
+    temperature:
+      name: "MI Temperature"
+      id: mi_temp
+      unit_of_measurement: "°C"
+      accuracy_decimals: 2
+    humidity:
+      name: "MI Humidity"
+      id: mi_hum
+      unit_of_measurement: "%"
+      accuracy_decimals: 2
+    battery_level:
+      name: "MI Battery"
+      id: mi_batt
+      entity_category: diagnostic
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: false
+    interval: 320ms
+    window: 32ms
+
+# ---------------- 上报到 Worker ----------------
+http_request:
+  verify_ssl: true
+  timeout: 15s
+  watchdog_timeout: 60s
+
+script:
+  # LOCAL：SHT40(+可选 BMP280) → Token A
+  # 部分上报：T+H 同时有效才写入；缺 P 则只报温湿度
+  - id: report_local
+    mode: queued
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(id(sht_temp).state) || !isnan(id(bmp_pressure).state);
+          then:
+            - http_request.post:
+                url: !secret thp_readings_url
+                request_headers:
+                  Authorization: !secret thp_local_auth
+                  Content-Type: application/json
+                json: |-
+                  bool has_th = !isnan(id(sht_temp).state) && !isnan(id(sht_hum).state)
+                                && id(sht_temp).state >= -40 && id(sht_temp).state <= 85
+                                && id(sht_hum).state >= 0 && id(sht_hum).state <= 100;
+                  bool has_p = !isnan(id(bmp_pressure).state)
+                               && id(bmp_pressure).state >= 300 && id(bmp_pressure).state <= 1200;
+                  if (!has_th && !has_p) {
+                    ESP_LOGW("thp", "LOCAL 无有效字段，跳过");
+                    return;
+                  }
+                  if (has_th) {
+                    root["temperature"] = roundf(id(sht_temp).state * 100.0f) / 100.0f;
+                    root["humidity"] = roundf(id(sht_hum).state * 100.0f) / 100.0f;
+                  }
+                  if (has_p) {
+                    root["pressure"] = roundf(id(bmp_pressure).state * 100.0f) / 100.0f;
+                  }
+                  const char *local_did = "${local_device_id}";
+                  if (local_did[0] != '\0') {
+                    root["device_id"] = local_did;
+                  }
+                  if (!isnan(id(wifi_rssi).state)) {
+                    root["rssi"] = (int)id(wifi_rssi).state;
+                  }
+                  auto now = id(thp_time).now();
+                  if (now.is_valid()) {
+                    time_t t = now.timestamp;
+                    struct tm tmv;
+                    gmtime_r(&t, &tmv);
+                    char buf[32];
+                    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+                    root["measured_at"] = buf;
+                  }
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code >= 200 && response->status_code < 300) {
+                          ESP_LOGI("thp", "LOCAL 上报 OK %d", response->status_code);
+                        } else {
+                          ESP_LOGW("thp", "LOCAL 上报失败 HTTP %d", response->status_code);
+                        }
+                on_error:
+                  then:
+                    - logger.log:
+                        level: WARN
+                        format: "LOCAL 上报网络失败"
+          else:
+            - logger.log:
+                level: WARN
+                format: "LOCAL 传感器均无读数，跳过本周期"
+
+  # MI：小米计 T+H → Token B（与 LOCAL 分设备）
+  - id: report_mi
+    mode: queued
+    then:
+      - if:
+          condition:
+            lambda: |-
+              return !isnan(id(mi_temp).state) && !isnan(id(mi_hum).state);
+          then:
+            - http_request.post:
+                url: !secret thp_readings_url
+                request_headers:
+                  Authorization: !secret thp_mi_auth
+                  Content-Type: application/json
+                json: |-
+                  root["temperature"] = roundf(id(mi_temp).state * 100.0f) / 100.0f;
+                  root["humidity"] = roundf(id(mi_hum).state * 100.0f) / 100.0f;
+                  const char *mi_did = "${mi_device_id}";
+                  if (mi_did[0] != '\0') {
+                    root["device_id"] = mi_did;
+                  }
+                  if (!isnan(id(wifi_rssi).state)) {
+                    root["rssi"] = (int)id(wifi_rssi).state;
+                  }
+                  auto now = id(thp_time).now();
+                  if (now.is_valid()) {
+                    time_t t = now.timestamp;
+                    struct tm tmv;
+                    gmtime_r(&t, &tmv);
+                    char buf[32];
+                    strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &tmv);
+                    root["measured_at"] = buf;
+                  }
+                on_response:
+                  then:
+                    - lambda: |-
+                        if (response->status_code >= 200 && response->status_code < 300) {
+                          ESP_LOGI("thp", "MI 上报 OK %d", response->status_code);
+                        } else {
+                          ESP_LOGW("thp", "MI 上报失败 HTTP %d", response->status_code);
+                        }
+                on_error:
+                  then:
+                    - logger.log:
+                        level: WARN
+                        format: "MI 上报网络失败"
+          else:
+            - logger.log:
+                level: WARN
+                format: "MI 尚无有效温湿度，跳过本周期"
+
+interval:
+  # 两条独立 interval，MI 用 delay 错开；http_request 仍是阻塞的，但单次最多卡 ~5s
+  - interval: ${report_interval}
+    then:
+      - script.execute: report_local
+  - interval: ${report_interval}
+    then:
+      - delay: ${mi_offset}
+      - script.execute: report_mi
