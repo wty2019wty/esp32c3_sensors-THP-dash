@@ -189,7 +189,7 @@ function bthomeParseObjects(objs) {
   while (off < objs.length) {
     const id = objs[off++];
     let vsz;
-    if (id === 0x00 || id === 0x01) vsz = 1;
+    if (id === 0x00 || id === 0x01 || id === 0x2e) vsz = 1;
     else if (id === 0x02 || id === 0x03 || id === 0x0c) vsz = 2;
     else break;
     if (off + vsz > objs.length) break;
@@ -202,10 +202,16 @@ function bthomeParseObjects(objs) {
     } else if (id === 0x03) {
       out.humidity = v.readUInt16LE(0) / 100;
       hasH = true;
+    } else if (id === 0x2e) {
+      out.humidity = v[0];
+      hasH = true;
     } else if (id === 0x0c) out.battery_mv = v.readUInt16LE(0);
     off += vsz;
   }
-  return hasT && hasH ? out : null;
+  if (!hasT || !hasH) return null;
+  if (out.temperature < -40 || out.temperature > 85) return null;
+  if (out.humidity < 0 || out.humidity > 100) return null;
+  return out;
 }
 
 function parseBthomeClear(afterUuid, advMac) {
@@ -342,6 +348,18 @@ function encryptBthomeV2({ temperature, humidity, battery_pct, battery_mv, packe
   assert.equal(s.temperature, 25.0);
   assert.equal(s.humidity, 50.55);
   console.log('bthome clear OK', s);
+}
+
+// --- BTHome v2 clear with uint8 humidity 0x2E (from bthome.io/format) ---
+// 40 02C409 2E23 → T=25.00 H=35
+{
+  const after = Buffer.from('4002c4092e23', 'hex');
+  const mac = parseMacStr('54:48:E6:8F:80:A5');
+  const s = parseBthomeClear(after, mac);
+  assert.ok(s, 'bthome clear 0x2E parse failed');
+  assert.equal(s.temperature, 25.0);
+  assert.equal(s.humidity, 35);
+  console.log('bthome clear 0x2E OK', s);
 }
 
 // --- BTHome v2 encrypted official vector (bthome.io/encryption/) ---
