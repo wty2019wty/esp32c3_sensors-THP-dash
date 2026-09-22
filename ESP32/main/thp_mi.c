@@ -73,7 +73,7 @@ bool thp_mi_init(void)
     bool key_ok = atc_ble_parse_key_hex(THP_MI_BINDKEY, key);
     if (!key_ok) {
         memset(key, 0, sizeof(key));
-        ESP_LOGW(TAG, "THP_MI_BINDKEY 非法或未填；明文 Custom 可工作，加密 beacon 需要 BindKey");
+        ESP_LOGW(TAG, "THP_MI_BINDKEY 非法或未填；明文 Custom/BTHome 可工作，加密 beacon 需要 BindKey");
     }
 
     esp_err_t mi_err = atc_ble_init(mac, key_ok ? key : NULL);

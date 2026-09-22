@@ -1,8 +1,10 @@
 /*
- * atc_ble — pvvx ATC_MiThermometer 被动扫描
+ * atc_ble — pvvx ATC_MiThermometer / BTHome v2 被动扫描
  * 支持：
  *   1) PVVX (Custom) 明文  — Service Data UUID 0x181A，size=18
  *   2) PVVX (Custom) 加密  — 同 UUID，size=14，AES-CCM + BindKey（AtcMiCodec）
+ *   3) BTHome v2 明文      — Service Data UUID 0xFCD2，device_info bit0=0
+ *   4) BTHome v2 加密      — 同 UUID，device_info bit0=1，AES-CCM + BindKey
  *
  * AtcMiCodec（与 pvvx python-interface 一致）：
  *   header = AD 前 4 字节 [size][0x16][0x1A][0x18]
@@ -10,6 +12,11 @@
  *   AAD    = 0x11
  *   cipher = codec[1 .. -4]，MIC = codec[-4 ..]
  *   plain  = int16 t*0.01 | uint16 h*0.01 | uint8 batt% | uint8 flags
+ *
+ * BTHome v2 加密（https://bthome.io/encryption/，V2 无 AAD）：
+ *   after_uuid = device_info | cipher | counter(4 LE) | MIC(4)
+ *   nonce      = adv_mac(MSB 显示序) + uuid_as_in_packet + device_info + counter
+ *   plain      = object 流（0x02 温度 / 0x03 湿度 / 0x01 电量% / 0x0C 电压）
  */
 #include <string.h>
 #include <ctype.h>
@@ -34,7 +41,19 @@
 static const char *TAG = "atc_ble";
 
 #define UUID16_ENV_SENSE   0x181A
+#define UUID16_BTHOME      0xFCD2
 #define AD_TYPE_SERVICE16  0x16
+
+#define BTHOME_DEV_INFO_VER2       0x40
+#define BTHOME_DEV_INFO_ENCRYPTED  0x01
+#define BTHOME_DEV_INFO_VER_MASK   0xE0
+
+/* BTHome object id：仅解析本项目需要的温湿度/电量/电压 */
+#define BTHOME_OBJ_PACKET_ID   0x00
+#define BTHOME_OBJ_BATTERY     0x01
+#define BTHOME_OBJ_TEMPERATURE 0x02
+#define BTHOME_OBJ_HUMIDITY    0x03
+#define BTHOME_OBJ_VOLTAGE     0x0C
 
 static atc_ble_sample_t s_latest;
 static portMUX_TYPE s_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -122,6 +141,56 @@ bool atc_ble_parse_key_hex(const char *s, uint8_t out[16])
 static bool th_range_ok(float t, float h)
 {
     return t >= -40.0f && t <= 85.0f && h >= 0.0f && h <= 100.0f;
+}
+
+/** AES-CCM 短 tag（4 字节）解密；成功写 plain，plain_len 为明文长度 */
+static bool ccm_decrypt_tag4(const uint8_t key[16],
+                             const uint8_t *nonce, size_t nonce_len,
+                             const uint8_t *aad, size_t aad_len,
+                             const uint8_t *ct_and_tag, size_t ct_tag_len,
+                             uint8_t *plain, size_t plain_cap, size_t *plain_len)
+{
+    if (ct_tag_len < 4) {
+        return false;
+    }
+    size_t cipher_len = ct_tag_len - 4;
+
+    psa_status_t st = psa_crypto_init();
+    if (st != PSA_SUCCESS) {
+        ESP_LOGE(TAG, "psa_crypto_init: %d", (int)st);
+        return false;
+    }
+
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
+    psa_set_key_bits(&attr, 128);
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DECRYPT | PSA_KEY_USAGE_VERIFY_MESSAGE);
+    psa_set_key_algorithm(&attr, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 4));
+
+    psa_key_id_t key_id = PSA_KEY_ID_NULL;
+    st = psa_import_key(&attr, key, 16, &key_id);
+    psa_reset_key_attributes(&attr);
+    if (st != PSA_SUCCESS) {
+        ESP_LOGW(TAG, "psa_import_key: %d", (int)st);
+        return false;
+    }
+
+    size_t out_len = 0;
+    st = psa_aead_decrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 4),
+                          nonce, nonce_len,
+                          aad, aad_len,
+                          ct_and_tag, ct_tag_len,
+                          plain, plain_cap, &out_len);
+    psa_destroy_key(key_id);
+    if (st != PSA_SUCCESS) {
+        ESP_LOGD(TAG, "psa_aead_decrypt: %d (bindkey/MAC/密文不符)", (int)st);
+        return false;
+    }
+    if (plain_len != NULL) {
+        *plain_len = out_len;
+    }
+    (void)cipher_len;
+    return true;
 }
 
 static bool mac_eq(const uint8_t a[6], const uint8_t b[6])
@@ -217,9 +286,7 @@ bool atc_ble_parse_pvvx_encrypted(const uint8_t *ad, uint16_t ad_len,
     const uint8_t *cipher = codec + 1;
     size_t cipher_len = codec_len - 1 - 4;
     const uint8_t *mic = codec + codec_len - 4;
-    const uint8_t aad = 0x11;
-    uint8_t plain[16];
-    if (cipher_len > sizeof(plain) || cipher_len < 6) {
+    if (cipher_len > 16 || cipher_len < 6) {
         return false;
     }
 
@@ -231,35 +298,12 @@ bool atc_ble_parse_pvvx_encrypted(const uint8_t *ad, uint16_t ad_len,
     memcpy(ct_and_tag, cipher, cipher_len);
     memcpy(ct_and_tag + cipher_len, mic, 4);
 
-    psa_status_t st = psa_crypto_init();
-    if (st != PSA_SUCCESS) {
-        ESP_LOGE(TAG, "psa_crypto_init: %d", (int)st);
-        return false;
-    }
-
-    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
-    psa_set_key_type(&attr, PSA_KEY_TYPE_AES);
-    psa_set_key_bits(&attr, 128);
-    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_DECRYPT | PSA_KEY_USAGE_VERIFY_MESSAGE);
-    psa_set_key_algorithm(&attr, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 4));
-
-    psa_key_id_t key_id = PSA_KEY_ID_NULL;
-    st = psa_import_key(&attr, bindkey, 16, &key_id);
-    psa_reset_key_attributes(&attr);
-    if (st != PSA_SUCCESS) {
-        ESP_LOGW(TAG, "psa_import_key: %d", (int)st);
-        return false;
-    }
-
+    const uint8_t aad = 0x11;
+    uint8_t plain[16];
     size_t plain_len = 0;
-    st = psa_aead_decrypt(key_id, PSA_ALG_AEAD_WITH_SHORTENED_TAG(PSA_ALG_CCM, 4),
-                          nonce, sizeof(nonce),
-                          &aad, 1,
+    if (!ccm_decrypt_tag4(bindkey, nonce, sizeof(nonce), &aad, 1,
                           ct_and_tag, cipher_len + 4,
-                          plain, sizeof(plain), &plain_len);
-    psa_destroy_key(key_id);
-    if (st != PSA_SUCCESS) {
-        ESP_LOGD(TAG, "psa_aead_decrypt: %d (bindkey/MAC/密文不符)", (int)st);
+                          plain, sizeof(plain), &plain_len)) {
         return false;
     }
     if (plain_len < 6) {
@@ -282,7 +326,160 @@ bool atc_ble_parse_pvvx_encrypted(const uint8_t *ad, uint16_t ad_len,
     return true;
 }
 
-/** 在原始广播数据中找 Service Data 0x181A 并解析 */
+/** BTHome v2 object 流：提取温度/湿度/电量%/电压；未知 id 按规范停止解析 */
+static bool bthome_parse_objects(const uint8_t *objs, uint16_t objs_len,
+                                 atc_ble_sample_t *out)
+{
+    if (objs == NULL || out == NULL) {
+        return false;
+    }
+    bool has_t = false;
+    bool has_h = false;
+    size_t off = 0;
+    while (off < objs_len) {
+        uint8_t id = objs[off++];
+        uint8_t vsz;
+        switch (id) {
+        case BTHOME_OBJ_PACKET_ID:
+        case BTHOME_OBJ_BATTERY:
+            vsz = 1;
+            break;
+        case BTHOME_OBJ_TEMPERATURE:
+        case BTHOME_OBJ_HUMIDITY:
+        case BTHOME_OBJ_VOLTAGE:
+            vsz = 2;
+            break;
+        default:
+            /* 规范：遇到不支持的 object id 即停止 */
+            off = objs_len;
+            continue;
+        }
+        if (off + vsz > objs_len) {
+            break;
+        }
+        const uint8_t *v = objs + off;
+        switch (id) {
+        case BTHOME_OBJ_PACKET_ID:
+            out->adv_counter = v[0];
+            break;
+        case BTHOME_OBJ_BATTERY:
+            out->battery_pct = v[0];
+            break;
+        case BTHOME_OBJ_TEMPERATURE:
+            out->temperature = (int16_t)(v[0] | (v[1] << 8)) / 100.0f;
+            has_t = true;
+            break;
+        case BTHOME_OBJ_HUMIDITY:
+            out->humidity = (uint16_t)(v[0] | (v[1] << 8)) / 100.0f;
+            has_h = true;
+            break;
+        case BTHOME_OBJ_VOLTAGE:
+            /* factor 0.001 V → 存 mV */
+            out->battery_mv = (uint16_t)(v[0] | (v[1] << 8));
+            break;
+        default:
+            break;
+        }
+        off += vsz;
+    }
+    return has_t && has_h && th_range_ok(out->temperature, out->humidity);
+}
+
+bool atc_ble_parse_bthome_clear(const uint8_t *after_uuid, uint16_t after_uuid_len,
+                                const uint8_t adv_mac[6], atc_ble_sample_t *out)
+{
+    if (after_uuid == NULL || out == NULL || after_uuid_len < 1) {
+        return false;
+    }
+    uint8_t info = after_uuid[0];
+    if ((info & BTHOME_DEV_INFO_ENCRYPTED) != 0) {
+        return false;
+    }
+    if ((info & BTHOME_DEV_INFO_VER_MASK) != BTHOME_DEV_INFO_VER2) {
+        return false;
+    }
+    if (adv_mac != NULL && s_has_mac_filter && !mac_eq(adv_mac, s_expect_mac)) {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->battery_pct = 0xFF;
+    if (adv_mac != NULL) {
+        memcpy(out->mac, adv_mac, 6);
+    }
+    return bthome_parse_objects(after_uuid + 1, (uint16_t)(after_uuid_len - 1), out);
+}
+
+bool atc_ble_parse_bthome_encrypted(const uint8_t *ad, uint16_t ad_len,
+                                    const uint8_t adv_mac[6],
+                                    const uint8_t bindkey[16],
+                                    atc_ble_sample_t *out)
+{
+    if (ad == NULL || out == NULL || adv_mac == NULL || bindkey == NULL) {
+        return false;
+    }
+    /* [size][0x16][uuid2][device_info][cipher...][counter4][mic4] */
+    if (ad_len < 4 + 1 + 0 + 4 + 4) {
+        return false;
+    }
+    if (ad[1] != AD_TYPE_SERVICE16 || ad[2] != 0xD2 || ad[3] != 0xFC) {
+        return false;
+    }
+    const uint8_t *codec = ad + 4;
+    uint16_t codec_len = (uint16_t)(ad_len - 4);
+    if (codec_len < 1 + 4 + 4) {
+        return false;
+    }
+    uint8_t info = codec[0];
+    if ((info & BTHOME_DEV_INFO_ENCRYPTED) == 0) {
+        return false;
+    }
+    if ((info & BTHOME_DEV_INFO_VER_MASK) != BTHOME_DEV_INFO_VER2) {
+        return false;
+    }
+
+    /* cipher = device_info 后到 counter 前；counter(4) + mic(4) 在尾部 */
+    size_t tail = 8;
+    size_t cipher_len = (size_t)codec_len - 1 - tail;
+    if (cipher_len < 2 || cipher_len > 16) {
+        return false;
+    }
+    const uint8_t *cipher = codec + 1;
+    const uint8_t *counter = codec + 1 + cipher_len;
+    const uint8_t *mic = counter + 4;
+
+    /* nonce = adv_mac(MSB) + uuid_as_in_packet + device_info + counter(4) */
+    uint8_t nonce[13];
+    memcpy(nonce, adv_mac, 6);
+    nonce[6] = 0xD2;
+    nonce[7] = 0xFC;
+    nonce[8] = info;
+    memcpy(nonce + 9, counter, 4);
+
+    uint8_t ct_and_tag[20];
+    memcpy(ct_and_tag, cipher, cipher_len);
+    memcpy(ct_and_tag + cipher_len, mic, 4);
+
+    uint8_t plain[16];
+    size_t plain_len = 0;
+    if (!ccm_decrypt_tag4(bindkey, nonce, sizeof(nonce), NULL, 0,
+                          ct_and_tag, cipher_len + 4,
+                          plain, sizeof(plain), &plain_len)) {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->battery_pct = 0xFF;
+    out->battery_mv = 0;
+    memcpy(out->mac, adv_mac, 6);
+    out->adv_counter = counter[0];
+    if (!bthome_parse_objects(plain, (uint16_t)plain_len, out)) {
+        return false;
+    }
+    return true;
+}
+
+/** 在原始广播数据中找 Service Data 0x181A / 0xFCD2 并解析 */
 static void handle_adv_raw(const uint8_t addr_msb[6], int8_t rssi,
                            const uint8_t *data, uint8_t len)
 {
@@ -308,37 +505,53 @@ static void handle_adv_raw(const uint8_t addr_msb[6], int8_t rssi,
 
         if (ad_type == AD_TYPE_SERVICE16 && plen >= 2) {
             uint16_t uuid = (uint16_t)(payload[0] | (payload[1] << 8));
-            if (uuid == UUID16_ENV_SENSE) {
+            if (uuid == UUID16_ENV_SENSE || uuid == UUID16_BTHOME) {
                 const uint8_t *after_uuid = payload + 2;
                 uint16_t after_len = (uint16_t)(plen - 2);
                 const uint8_t *ad_elem = data + off; /* [size][type][...] */
 
                 atc_ble_sample_t s;
                 bool ok = false;
-                /* 明文：UUID 后 15 字节（MAC6+T2+H2+mV2+batt+cnt+flags），AD size=18(0x12)
-                 * 加密：UUID 后约 11 字节（codec0+cipher+mic），AD size=14(0x0e) */
-                bool looks_clear = (after_len >= 15);
-                bool looks_enc = (s_has_bindkey && after_len >= 11);
+                bool is_bthome = (uuid == UUID16_BTHOME);
 
-                if (looks_clear && after_len >= 15) {
-                    ok = atc_ble_parse_pvvx_clear(after_uuid, after_len, addr_msb, &s);
-                }
-                if (!ok && looks_enc && s_has_bindkey) {
-                    ok = atc_ble_parse_pvvx_encrypted(ad_elem, (uint16_t)(1 + ad_len),
-                                                      addr_msb, s_bindkey, &s);
+                if (!is_bthome) {
+                    /* PVVX 明文：UUID 后 15 字节（MAC6+T2+H2+mV2+batt+cnt+flags），AD size=18
+                     * PVVX 加密：UUID 后约 11 字节（codec0+cipher+mic），AD size=14 */
+                    bool looks_clear = (after_len >= 15);
+                    bool looks_enc = (s_has_bindkey && after_len >= 11);
+
+                    if (looks_clear) {
+                        ok = atc_ble_parse_pvvx_clear(after_uuid, after_len, addr_msb, &s);
+                    }
+                    if (!ok && looks_enc && s_has_bindkey) {
+                        ok = atc_ble_parse_pvvx_encrypted(ad_elem, (uint16_t)(1 + ad_len),
+                                                          addr_msb, s_bindkey, &s);
+                    }
+                } else {
+                    /* BTHome v2：device_info bit0 区分加密；加密帧至少 device_info+counter+mic */
+                    bool looks_enc = (after_len >= 1 + 4 + 4) &&
+                                     (after_uuid[0] & BTHOME_DEV_INFO_ENCRYPTED) != 0;
+                    if (!looks_enc) {
+                        ok = atc_ble_parse_bthome_clear(after_uuid, after_len, addr_msb, &s);
+                    } else if (s_has_bindkey) {
+                        ok = atc_ble_parse_bthome_encrypted(ad_elem, (uint16_t)(1 + ad_len),
+                                                            addr_msb, s_bindkey, &s);
+                    }
                 }
                 if (ok) {
                     memcpy(s.mac, addr_msb, 6);
                     s.rssi = rssi;
                     cache_store(&s);
-                    ESP_LOGD(TAG, "ATC帧 t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
+                    ESP_LOGD(TAG, "%s帧 t=%.2f h=%.2f batt=%u%% rssi=%d mac=%02X:%02X:%02X:%02X:%02X:%02X",
+                             is_bthome ? "BTHome" : "ATC",
                              (double)s.temperature, (double)s.humidity,
                              s.battery_pct == 0xFF ? 0 : s.battery_pct,
                              (int)rssi,
                              addr_msb[0], addr_msb[1], addr_msb[2],
                              addr_msb[3], addr_msb[4], addr_msb[5]);
                 } else {
-                    ESP_LOGD(TAG, "0x181A 未解析 mac=%02X:%02X:%02X:%02X:%02X:%02X after=%u",
+                    ESP_LOGD(TAG, "0x%04X 未解析 mac=%02X:%02X:%02X:%02X:%02X:%02X after=%u",
+                             uuid,
                              addr_msb[0], addr_msb[1], addr_msb[2],
                              addr_msb[3], addr_msb[4], addr_msb[5],
                              after_len);

@@ -1,7 +1,8 @@
 /*
- * atc_ble — pvvx ATC / PVVX(Custom) BLE 被动扫描与解析
- * 明文 Custom：Service Data UUID 0x181A，MAC+T/H+电量
- * 加密 Custom：同 UUID，AES-CCM + BindKey（pvvx AtcMiCodec）
+ * atc_ble — pvvx ATC / PVVX(Custom) / BTHome v2 BLE 被动扫描与解析
+ * PVVX 明文：Service Data UUID 0x181A，MAC+T/H+电量
+ * PVVX 加密：同 UUID，AES-CCM + BindKey（pvvx AtcMiCodec，AAD=0x11）
+ * BTHome v2 明文/加密：Service Data UUID 0xFCD2，object 流 / AES-CCM + BindKey
  */
 #pragma once
 
@@ -66,3 +67,20 @@ bool atc_ble_parse_pvvx_encrypted(const uint8_t *ad, uint16_t ad_len,
                                   const uint8_t adv_mac[6],
                                   const uint8_t bindkey[16],
                                   atc_ble_sample_t *out);
+
+/**
+ * @brief 解析 BTHome v2 明文 service-data payload（UUID 0xFCD2 之后）
+ * @param after_uuid  device_info + object 流
+ */
+bool atc_ble_parse_bthome_clear(const uint8_t *after_uuid, uint16_t after_uuid_len,
+                                const uint8_t adv_mac[6], atc_ble_sample_t *out);
+
+/**
+ * @brief 解析 BTHome v2 加密帧（AES-CCM，无 AAD，counter 在密文后）
+ * @param ad          完整 AD：size, 0x16, 0xD2, 0xFC, device_info, cipher, counter, mic
+ * @param bindkey     16 字节
+ */
+bool atc_ble_parse_bthome_encrypted(const uint8_t *ad, uint16_t ad_len,
+                                    const uint8_t adv_mac[6],
+                                    const uint8_t bindkey[16],
+                                    atc_ble_sample_t *out);
