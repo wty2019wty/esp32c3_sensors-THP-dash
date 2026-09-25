@@ -73,7 +73,15 @@ static esp_err_t i2c_bus_init(void)
         .glitch_ignore_cnt = I2C_GLITCH_IGNORE_CNT,
         .flags.enable_internal_pullup = true,
     };
-    return i2c_new_master_bus(&bus_cfg, &s_bus);
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* deep sleep 唤醒后 I2C 从设备可能挂在半字节上：先 reset 再探测 */
+    vTaskDelay(pdMS_TO_TICKS(20));
+    (void)i2c_master_bus_reset(s_bus);
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return ESP_OK;
 }
 
 static void sensors_retry_init_if_missing(void)

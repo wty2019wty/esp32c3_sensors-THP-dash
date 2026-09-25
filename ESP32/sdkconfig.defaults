@@ -33,8 +33,9 @@ CONFIG_LWIP_DNS_MAX_SERVERS=3
 
 # 主任务栈：Wi-Fi + TLS + HTTP 会话较占栈
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-# tick 降频配合 light sleep / 占空比（tick 精度 10ms，足够本工程）
-CONFIG_FREERTOS_HZ=100
+# 必须 1000：传感器短延时（SHT40 2ms / BMP280 2ms）在 100Hz 下会变成 0 tick
+# 功耗已靠 deep sleep 解决，tick 频率对睡眠电流影响可忽略
+CONFIG_FREERTOS_HZ=1000
 
 # 动态调频 + 自动 light sleep：空闲段降频休眠；TLS/上报时拉到 max
 # （A3 默认 CPU 80；min 10 由 esp_pm_configure 设置）

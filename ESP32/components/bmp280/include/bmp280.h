@@ -19,6 +19,7 @@
 
 #define BMP280_REG_CHIP_ID          0xD0
 #define BMP280_REG_RESET            0xE0
+#define BMP280_RESET_MAGIC          0xB6
 #define BMP280_REG_CALIB            0x88
 #define BMP280_REG_STATUS           0xF3
 #define BMP280_REG_CTRL_MEAS        0xF4

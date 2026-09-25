@@ -57,7 +57,8 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_spe
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "SHT40 软复位失败: %s", esp_err_to_name(err));
         } else {
-            vTaskDelay(pdMS_TO_TICKS(SHT40_RESET_DELAY_MS));
+            /* 复位需 >1ms；至少 1 tick */
+            vTaskDelay(pdMS_TO_TICKS(SHT40_RESET_DELAY_MS + 1));
         }
 
         sht->present = true;

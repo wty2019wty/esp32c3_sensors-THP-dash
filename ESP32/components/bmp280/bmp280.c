@@ -94,6 +94,10 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     }
     bmp->i2c_addr = chosen;
 
+    /* deep sleep 后 I2C 可能半卡死：先软复位芯片再读 WHOAMI */
+    (void)bmp280_write_reg(bmp, BMP280_REG_RESET, BMP280_RESET_MAGIC);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
     uint8_t chip_id = 0;
     err = bmp280_read_regs(bmp, BMP280_REG_CHIP_ID, &chip_id, 1);
     if (err != ESP_OK) {
@@ -120,7 +124,8 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
         ESP_LOGE(TAG, "写入 CTRL_MEAS(sleep) 失败: %s", esp_err_to_name(err));
         return err;
     }
-    vTaskDelay(pdMS_TO_TICKS(2));
+    /* 至少 1 tick：HZ 变化时 2ms 不得被收成 0 */
+    vTaskDelay(pdMS_TO_TICKS(3));
     err = bmp280_write_reg(bmp, BMP280_REG_CONFIG, BMP280_CONFIG_FILTER4);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "写入 CONFIG 失败: %s", esp_err_to_name(err));
@@ -147,9 +152,12 @@ esp_err_t bmp280_read(bmp280_t *bmp, float *temp_c, float *press_hpa, float *alt
         return err;
     }
 
-    /* 等 measuring 位置位后再清零，避免刚触发就读到旧数据 */
+    /* 等 measuring 位清零；轮询间隔至少 1 tick，避免忙等 */
     vTaskDelay(pdMS_TO_TICKS(10));
     int waited = 10;
+    const TickType_t poll_ticks = pdMS_TO_TICKS(BMP280_FORCED_POLL_MS) > 0
+                                      ? pdMS_TO_TICKS(BMP280_FORCED_POLL_MS)
+                                      : 1;
     while (waited <= BMP280_FORCED_TIMEOUT_MS) {
         uint8_t st = 0;
         err = bmp280_read_regs(bmp, BMP280_REG_STATUS, &st, 1);
@@ -160,7 +168,7 @@ esp_err_t bmp280_read(bmp280_t *bmp, float *temp_c, float *press_hpa, float *alt
         if ((st & BMP280_STATUS_MEASURING) == 0) {
             break;
         }
-        vTaskDelay(pdMS_TO_TICKS(BMP280_FORCED_POLL_MS));
+        vTaskDelay(poll_ticks);
         waited += BMP280_FORCED_POLL_MS;
     }
     if (waited > BMP280_FORCED_TIMEOUT_MS) {

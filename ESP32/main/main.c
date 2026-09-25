@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_pm.h"
@@ -17,6 +18,7 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 
+#include "i2c_config.h"
 #include "thp_config.h"
 #include "thp_mi.h"
 #include "thp_queue.h"
@@ -82,6 +84,15 @@ static void enter_deep_sleep(uint64_t work_elapsed_us)
     }
 
     thp_wifi_radio_off();
+
+    /* 深睡前把 I2C 拉成确定态，减轻从设备在睡眠中挂死 */
+    gpio_set_direction(I2C_SDA_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_direction(I2C_SCL_GPIO, GPIO_MODE_INPUT_OUTPUT_OD);
+    gpio_set_pull_mode(I2C_SDA_GPIO, GPIO_PULLUP_ONLY);
+    gpio_set_pull_mode(I2C_SCL_GPIO, GPIO_PULLUP_ONLY);
+    gpio_set_level(I2C_SDA_GPIO, 1);
+    gpio_set_level(I2C_SCL_GPIO, 1);
+
     thp_time_rtc_save(sleep_us);
 
     ESP_LOGI(TAG, "进入 deep sleep %lldms（周期 %dms，活跃 %lldms）",
