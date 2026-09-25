@@ -15,6 +15,7 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "nvs_flash.h"
 
 #include "thp_config.h"
@@ -38,6 +39,26 @@ static void nvs_init(void)
     ESP_ERROR_CHECK(err);
 }
 
+/* 动态调频 + 自动 light sleep：空闲（Wi-Fi off + vTaskDelay）进休眠 */
+static void power_management_init(void)
+{
+#if CONFIG_PM_ENABLE
+    esp_pm_config_t cfg = {
+        .max_freq_mhz = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        .min_freq_mhz = 10,
+        .light_sleep_enable = true,
+    };
+    esp_err_t err = esp_pm_configure(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_pm_configure 失败: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "PM: max=%dMHz min=10MHz light_sleep=on", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    }
+#else
+    ESP_LOGW(TAG, "CONFIG_PM_ENABLE 未开，无法自动 light sleep");
+#endif
+}
+
 static void check_local_token(void)
 {
     if (strcmp(THP_DEVICE_TOKEN, "thp_replace_me") == 0 ||
@@ -53,6 +74,7 @@ void app_main(void)
     check_local_token();
 
     nvs_init();
+    power_management_init();
 
     if (thp_sensors_init() != ESP_OK) {
         ESP_LOGE(TAG, "传感器总线初始化失败");

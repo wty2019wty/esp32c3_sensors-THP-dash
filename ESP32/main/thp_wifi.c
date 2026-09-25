@@ -22,6 +22,8 @@ static const char *TAG = "thp.wifi";
 
 static EventGroupHandle_t s_wifi_events;
 static int s_wifi_retry;
+static bool s_wifi_started;
+static bool s_wifi_inited;
 
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -47,6 +49,42 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         xEventGroupClearBits(s_wifi_events, WIFI_FAIL_BIT);
         xEventGroupSetBits(s_wifi_events, WIFI_CONNECTED_BIT);
     }
+}
+
+static void wifi_apply_tx_power(void)
+{
+    /* Super Mini 天线差：单位 0.25 dBm，夹到 8~20 dBm */
+    int8_t tx_dbm = (int8_t)THP_WIFI_STA_TX_POWER_DBM;
+    if (tx_dbm < 8) {
+        tx_dbm = 8;
+    } else if (tx_dbm > 20) {
+        tx_dbm = 20;
+    }
+    esp_err_t pwr_err = esp_wifi_set_max_tx_power((int8_t)(tx_dbm * 4));
+    if (pwr_err != ESP_OK) {
+        ESP_LOGW(TAG, "set max TX power (%d dBm) failed: %s", (int)tx_dbm, esp_err_to_name(pwr_err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi STA max TX power = %d dBm", (int)tx_dbm);
+    }
+}
+
+static void wifi_apply_ps(void)
+{
+    /* modem sleep：无 TX/RX 时射频休眠；配合 light sleep 降空闲功耗 */
+    esp_err_t err = esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_ps(MIN_MODEM) failed: %s", esp_err_to_name(err));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi PS = MIN_MODEM");
+    }
+}
+
+static bool wait_connected(uint32_t timeout_ms)
+{
+    EventBits_t bits = xEventGroupWaitBits(
+        s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(timeout_ms));
+    return (bits & WIFI_CONNECTED_BIT) != 0;
 }
 
 esp_err_t thp_wifi_init_sta(void)
@@ -78,34 +116,59 @@ esp_err_t thp_wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
+    s_wifi_started = true;
+    s_wifi_inited = true;
 
-    /* Super Mini 天线差：单位 0.25 dBm，夹到 8~20 dBm */
-    int8_t tx_dbm = (int8_t)THP_WIFI_STA_TX_POWER_DBM;
-    if (tx_dbm < 8) {
-        tx_dbm = 8;
-    } else if (tx_dbm > 20) {
-        tx_dbm = 20;
-    }
-    esp_err_t pwr_err = esp_wifi_set_max_tx_power((int8_t)(tx_dbm * 4));
-    if (pwr_err != ESP_OK) {
-        ESP_LOGW(TAG, "set max TX power (%d dBm) failed: %s", (int)tx_dbm, esp_err_to_name(pwr_err));
-    } else {
-        ESP_LOGI(TAG, "Wi-Fi STA max TX power = %d dBm", (int)tx_dbm);
-    }
+    wifi_apply_tx_power();
+    wifi_apply_ps();
 
     ESP_LOGI(TAG, "Wi-Fi STA 启动，SSID=%s", THP_WIFI_SSID);
 
-    EventBits_t bits = xEventGroupWaitBits(
-        s_wifi_events, WIFI_CONNECTED_BIT, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(THP_WIFI_CONNECT_TIMEOUT_MS));
-
-    if (bits & WIFI_CONNECTED_BIT) {
+    if (wait_connected(THP_WIFI_CONNECT_TIMEOUT_MS)) {
         return ESP_OK;
     }
-    ESP_LOGW(TAG, "Wi-Fi 首次连接超时（%dms），事件回调仍会继续重连",
-             THP_WIFI_CONNECT_TIMEOUT_MS);
+    ESP_LOGW(TAG, "Wi-Fi 首次连接超时（%ums），事件回调仍会继续重连",
+             (unsigned)THP_WIFI_CONNECT_TIMEOUT_MS);
     xEventGroupSetBits(s_wifi_events, WIFI_FAIL_BIT);
     return ESP_FAIL;
+}
+
+esp_err_t thp_wifi_radio_on(uint32_t timeout_ms)
+{
+    if (!s_wifi_inited) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!s_wifi_started) {
+        esp_err_t err = esp_wifi_start();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "esp_wifi_start 失败: %s", esp_err_to_name(err));
+            return err;
+        }
+        s_wifi_started = true;
+        wifi_apply_ps();
+        wifi_apply_tx_power();
+        ESP_LOGI(TAG, "Wi-Fi 射频开启，等待连接…");
+    }
+    if (wait_connected(timeout_ms)) {
+        return ESP_OK;
+    }
+    ESP_LOGW(TAG, "Wi-Fi 射频开启后 %ums 内未连上", (unsigned)timeout_ms);
+    return ESP_ERR_TIMEOUT;
+}
+
+void thp_wifi_radio_off(void)
+{
+    if (!s_wifi_inited || !s_wifi_started) {
+        return;
+    }
+    xEventGroupClearBits(s_wifi_events, WIFI_CONNECTED_BIT);
+    esp_err_t err = esp_wifi_stop();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_stop: %s", esp_err_to_name(err));
+        return;
+    }
+    s_wifi_started = false;
+    ESP_LOGI(TAG, "Wi-Fi 射频已关（进入空闲/light sleep）");
 }
 
 bool thp_wifi_is_connected(void)
@@ -120,6 +183,9 @@ bool thp_wifi_get_rssi(int *rssi)
 {
     wifi_ap_record_t ap;
     if (rssi == NULL) {
+        return false;
+    }
+    if (!s_wifi_started) {
         return false;
     }
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {

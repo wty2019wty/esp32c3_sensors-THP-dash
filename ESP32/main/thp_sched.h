@@ -1,15 +1,13 @@
 /*
- * 上报周期调度：单任务流水线
+ * 上报周期调度：单任务流水线（Wi-Fi 占空比 + 空闲 light sleep）
  *
- * BLE 窗口：周期起点 T 前 5s 开扫，T+10s 关窗；MI 取距 T 最近帧。
- * 每周期阶段：
- *   0. T-5s 开 BLE 窗（默认不扫，仅窗口内扫描）
- *   1. T 时刻：NTP（已同步则短路）
- *   2. LOCAL I2C 采样 → 上报或入队
- *   3. 等到 T+10s 关窗 → MI 取距 T 最近帧 → 上报或入队
- *   4. 离线补传（deadline 预算内）
- *   5. 睡到下一周期 T'-5s
+ * 每周期：
+ *   T-8s  thp_wifi_radio_on
+ *   T-5s  （若 MI）开 BLE 窗
+ *   T     NTP → LOCAL 采样上报 →（若 MI）取帧上报 → 补传
+ *   之后  thp_wifi_radio_off，vTaskDelay 空闲（PM light sleep）
  *
+ * MI 关闭时跳过 BLE 窗与 T+10s 等待。
  * deadline = cycle_start + period - margin，绝对 tick 下沉到 report 层。
  */
 #pragma once
