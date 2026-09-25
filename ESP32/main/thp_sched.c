@@ -21,7 +21,10 @@ static const char *TAG = "thp.sched";
 #ifndef THP_OFFLINE_FLUSH_MAX_PER_CYCLE
 #define THP_OFFLINE_FLUSH_MAX_PER_CYCLE 16
 #endif
-#define THP_FLUSH_MIN_REMAIN_MS 8000
+/* 补传活跃段封顶，避免积压 HTTP 打穿周期、只留下限睡眠 */
+#ifndef THP_FLUSH_BUDGET_MS
+#define THP_FLUSH_BUDGET_MS 45000
+#endif
 
 bool thp_sched_wake_from_sleep(void)
 {
@@ -68,30 +71,28 @@ static void stage_local(void)
     thp_report_or_enqueue(&reading, deadline);
 }
 
-static void stage_mi(void)
+static void stage_mi(int64_t cycle_ref_ms)
 {
     if (!thp_mi_is_ready()) {
         return;
     }
-    int64_t ref_ms = esp_timer_get_time() / 1000;
+    /* 窗口已在 run_once 开头 open；LOCAL 过快时补一点扫描时间 */
+    vTaskDelay(pdMS_TO_TICKS(2000));
     TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS + 4000);
-    thp_mi_scan_window_realign(ref_ms);
-    thp_mi_report_cycle(ref_ms, deadline);
+    thp_mi_scan_window_realign(cycle_ref_ms);
+    thp_mi_report_cycle(cycle_ref_ms, deadline);
     thp_mi_scan_window_close();
 }
 
 static void stage_flush(void)
 {
-    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS + 4000);
     unsigned pending = thp_queue_count();
     if (pending == 0) {
         return;
     }
-    /* 有积压时再给一些预算；仍受 report 内 deadline 约束 */
-    deadline = xTaskGetTickCount() +
-               pdMS_TO_TICKS((THP_HTTP_TIMEOUT_MS + 2000) * (THP_OFFLINE_FLUSH_MAX_PER_CYCLE + 2));
-    ESP_LOGI(TAG, "补传预算内处理积压 %u 条（上限 %d）",
-             pending, THP_OFFLINE_FLUSH_MAX_PER_CYCLE);
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_FLUSH_BUDGET_MS);
+    ESP_LOGI(TAG, "补传积压 %u 条（上限 %d，预算 %dms）",
+             pending, THP_OFFLINE_FLUSH_MAX_PER_CYCLE, THP_FLUSH_BUDGET_MS);
     thp_report_flush_queue(THP_OFFLINE_FLUSH_MAX_PER_CYCLE, deadline);
 }
 
@@ -104,9 +105,13 @@ void thp_sched_run_once(void)
              (int)thp_wifi_is_connected(),
              thp_queue_count());
 
+    /* 深睡模型没有 T-5s 预开窗：进入工作即 open，采样/上报期间收帧 */
+    const int64_t cycle_ref_ms = esp_timer_get_time() / 1000;
+    thp_mi_scan_window_open(cycle_ref_ms);
+
     stage_time();
     stage_local();
-    stage_mi();
+    stage_mi(cycle_ref_ms);
     stage_flush();
 
     ESP_LOGI(TAG, "—— 唤醒工作结束 heap=%u queue=%u ——",

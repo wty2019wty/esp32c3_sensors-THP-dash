@@ -58,13 +58,14 @@
 
 /* ---------------- 离线补传 ----------------
  * 网络/5xx 重试仍失败时入队；恢复后按时间顺序补传（body 带历史 ts）。
- * 288 ≈ 5 分钟周期 × 24h；队列满丢最旧。仅 RAM，断电不保留。
+ * 队列在 RTC 慢速内存：deep sleep 保留，上电/掉电清空。16 条约 1KB，C3 RTC 约 8KB。
+ * 不要设成数百——那会撑爆 RTC；需要更长离线请加大周期或上 Flash 日志。
  * 补传条与条之间的间隔（毫秒），避免瞬时打满接口。
- * 每周期最多补传条数：限制积压排空对当前采样的阻塞。
+ * 每唤醒最多补传条数 + THP_FLUSH_BUDGET_MS（thp_sched.c）限制活跃时长。
  */
-#define THP_OFFLINE_QUEUE_LEN     288
+#define THP_OFFLINE_QUEUE_LEN     16
 #define THP_OFFLINE_FLUSH_GAP_MS  200
-#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE  24
+#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE  16
 
 /* 单次 HTTP(S) 请求总超时（毫秒）。
  * C3 上 BLE/Wi-Fi 共存，握手偏慢；15s 为预算与假失败的折中。
@@ -78,7 +79,7 @@
 #define THP_CYCLE_DEADLINE_MARGIN_MS  20000
 
 /* ---------------- NTP（measured_at；入库时间仍以服务端为准） ----------------
- * 已同步时跳过；每 N 个周期才重启 SNTP 重同步（漂移检测二期）。
+ * 已同步时跳过；每 N 次唤醒才真正 SNTP 重同步。skip 计数在 RTC，跨 deep sleep 累加。
  * 服务器数量须 ≤ CONFIG_LWIP_SNTP_MAX_SERVERS（sdkconfig.defaults 已设 4）。
  * 国内优先：阿里云 / 国家授时中心；pool 作兜底。
  */

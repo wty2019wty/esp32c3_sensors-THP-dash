@@ -36,8 +36,11 @@ static const char *TAG = "thp.time";
 #endif
 
 static EventGroupHandle_t s_time_events;
-/** 已同步后跳过的周期数；达到 THP_NTP_RESYNC_EVERY_CYCLES 则重同步 */
-static unsigned s_sync_skip_count;
+/*
+ * 已同步后跳过的周期数；达到 THP_NTP_RESYNC_EVERY_CYCLES 则重同步。
+ * 必须放 RTC：deep sleep 每次唤醒 RAM 清零，否则永远凑不满 N 次。
+ */
+RTC_DATA_ATTR static unsigned s_sync_skip_count;
 
 /* deep sleep 跨重启时间传递（RTC 慢速内存） */
 RTC_DATA_ATTR static int64_t s_rtc_epoch_us;
@@ -320,7 +323,7 @@ bool thp_time_rtc_restore(void)
     if (s_time_events) {
         xEventGroupSetBits(s_time_events, SNTP_SYNC_BIT);
     }
-    s_sync_skip_count = 0;
+    /* 不重置 s_sync_skip_count：跨唤醒累加，才能按 N 次周期真正打 NTP */
     char iso[ISO_UTC_BUF_LEN];
     thp_time_format_iso(iso);
     ESP_LOGI(TAG, "RTC 恢复系统时间 UTC=%s（含计划睡眠漂移）", iso[0] ? iso : "(fmt-fail)");

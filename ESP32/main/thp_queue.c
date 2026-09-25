@@ -13,6 +13,11 @@ static const char *TAG = "thp.queue";
 #define THP_OFFLINE_QUEUE_LEN 16
 #endif
 
+/* RTC 慢速内存约 8KB（C3）；thp_reading_t ≈ 60B，32 条已接近上限 */
+#if THP_OFFLINE_QUEUE_LEN > 32
+#error "THP_OFFLINE_QUEUE_LEN 过大，RTC 慢速内存放不下（请 ≤ 32）"
+#endif
+
 #define THP_QUEUE_MAGIC 0x54485131u /* "THQ1" */
 
 /* RTC 慢速内存：deep sleep 保持，断电/上电复位清零 */
