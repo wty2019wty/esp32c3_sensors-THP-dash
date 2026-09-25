@@ -13,9 +13,10 @@ static const char *TAG = "thp.queue";
 #define THP_OFFLINE_QUEUE_LEN 16
 #endif
 
-/* RTC 慢速内存约 8KB（C3）；thp_reading_t ≈ 60B，32 条已接近上限 */
+/* RTC 慢速内存约 8KB（C3）；thp_reading_t ≈ 60B。
+ * 物理上限约 130 条，32 条（约 2KB）是留给其它 RTC 变量的保守封顶。 */
 #if THP_OFFLINE_QUEUE_LEN > 32
-#error "THP_OFFLINE_QUEUE_LEN 过大，RTC 慢速内存放不下（请 ≤ 32）"
+#error "THP_OFFLINE_QUEUE_LEN 过大，RTC 慢速内存保守上限 32（需要更长离线请上 Flash）"
 #endif
 
 #define THP_QUEUE_MAGIC 0x54485131u /* "THQ1" */
