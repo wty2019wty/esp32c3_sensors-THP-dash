@@ -1,5 +1,8 @@
 /*
- * 离线补传队列（RAM 环形缓冲）
+ * 离线补传队列（RTC 慢速内存环形缓冲）
+ *
+ * deep sleep 后保留；上电复位（非 timer 唤醒）时 magic 失效则清空。
+ * 容量 THP_OFFLINE_QUEUE_LEN（默认 16，RTC 约 8KB 内）。
  */
 #pragma once
 

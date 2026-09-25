@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/time.h>
 
+#include "esp_attr.h"
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
@@ -37,6 +38,13 @@ static const char *TAG = "thp.time";
 static EventGroupHandle_t s_time_events;
 /** 已同步后跳过的周期数；达到 THP_NTP_RESYNC_EVERY_CYCLES 则重同步 */
 static unsigned s_sync_skip_count;
+
+/* deep sleep 跨重启时间传递（RTC 慢速内存） */
+RTC_DATA_ATTR static int64_t s_rtc_epoch_us;
+RTC_DATA_ATTR static int64_t s_rtc_planned_sleep_us;
+RTC_DATA_ATTR static uint32_t s_rtc_time_magic;
+
+#define THP_TIME_MAGIC 0x54485431u /* "THT1" */
 
 static void time_events_ensure(void)
 {
@@ -94,6 +102,25 @@ void thp_time_sntp_start(void)
     } else {
         ESP_LOGW(TAG, "启动时 SNTP 同步失败/超时(%s)，将由每周期上报前再同步",
                  esp_err_to_name(err));
+    }
+}
+
+void thp_time_sntp_ensure(void)
+{
+    time_events_ensure();
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        THP_NTP_NUM_SERVERS, THP_NTP_SERVER_LIST);
+    cfg.start = false;
+    cfg.wait_for_sync = false;
+    cfg.server_from_dhcp = false;
+    cfg.renew_servers_after_new_IP = false;
+    cfg.smooth_sync = false;
+    if (cfg.num_of_servers > CONFIG_LWIP_SNTP_MAX_SERVERS) {
+        cfg.num_of_servers = CONFIG_LWIP_SNTP_MAX_SERVERS;
+    }
+    esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGW(TAG, "SNTP ensure init: %s", esp_err_to_name(err));
     }
 }
 
@@ -254,4 +281,48 @@ void thp_time_stamp_reading(thp_reading_t *r)
     if (thp_time_is_synced()) {
         r->has_iso = thp_time_format_iso(r->iso);
     }
+}
+
+void thp_time_rtc_save(int64_t planned_sleep_us)
+{
+    struct timeval tv = {0};
+    gettimeofday(&tv, NULL);
+    int64_t epoch_us = (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
+    if (epoch_us < 1600000000LL * 1000000LL) {
+        /* 尚无可信 UTC，不写 magic，醒来重新 NTP */
+        s_rtc_time_magic = 0;
+        ESP_LOGW(TAG, "RTC 存时跳过：系统时间尚不可信");
+        return;
+    }
+    s_rtc_epoch_us = epoch_us;
+    s_rtc_planned_sleep_us = planned_sleep_us > 0 ? planned_sleep_us : 0;
+    s_rtc_time_magic = THP_TIME_MAGIC;
+    ESP_LOGI(TAG, "RTC 已存时 epoch_us=%lld planned_sleep_us=%lld",
+             (long long)epoch_us, (long long)s_rtc_planned_sleep_us);
+}
+
+bool thp_time_rtc_restore(void)
+{
+    if (s_rtc_time_magic != THP_TIME_MAGIC) {
+        ESP_LOGW(TAG, "RTC 无有效时间，待 NTP");
+        return false;
+    }
+    int64_t now_us = s_rtc_epoch_us + s_rtc_planned_sleep_us;
+    if (now_us < 1600000000LL * 1000000LL) {
+        return false;
+    }
+    struct timeval tv = {
+        .tv_sec = (time_t)(now_us / 1000000LL),
+        .tv_usec = (suseconds_t)(now_us % 1000000LL),
+    };
+    settimeofday(&tv, NULL);
+    time_events_ensure();
+    if (s_time_events) {
+        xEventGroupSetBits(s_time_events, SNTP_SYNC_BIT);
+    }
+    s_sync_skip_count = 0;
+    char iso[ISO_UTC_BUF_LEN];
+    thp_time_format_iso(iso);
+    ESP_LOGI(TAG, "RTC 恢复系统时间 UTC=%s（含计划睡眠漂移）", iso[0] ? iso : "(fmt-fail)");
+    return true;
 }

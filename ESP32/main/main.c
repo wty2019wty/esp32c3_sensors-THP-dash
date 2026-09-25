@@ -1,21 +1,20 @@
 /*
  * THP Dash 设备端 — ESP32-C3
  *
- * 模块：
- *   thp_wifi / thp_time / thp_sensors / thp_queue / thp_report / thp_mi
- *   thp_sched — 单任务周期流水线
- *               BLE 窗 T-5s~T+10s（默认不持续扫描）
- *               校时 → LOCAL → 关窗取 MI → 补传 → 睡到下窗
- *               deadline = period - margin，耗尽时 HTTP 跳过、读数仍入队
+ * deep sleep 模型：唤醒 → Wi-Fi/采样/上报/补传 → 关射频 → deep sleep
+ * RTC：离线队列 ~16 条 + 系统时间跨睡眠传递
  *
  * 上报：HTTPS POST {THP_API_BASE}/api/v1/readings
  *   Authorization: Bearer <device_token>
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
 #include "esp_pm.h"
+#include "esp_sleep.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 
 #include "thp_config.h"
@@ -29,6 +28,12 @@
 
 static const char *TAG = "thp";
 
+#ifndef THP_REPORT_PERIOD_MS
+#define THP_REPORT_PERIOD_MS (5 * 60 * 1000)
+#endif
+/* 唤醒后至少还睡这么久，避免抖动导致几乎不睡 */
+#define THP_DEEP_SLEEP_MIN_MS 8000
+
 static void nvs_init(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -39,7 +44,7 @@ static void nvs_init(void)
     ESP_ERROR_CHECK(err);
 }
 
-/* 动态调频 + 自动 light sleep：空闲（Wi-Fi off + vTaskDelay）进休眠 */
+/* 动态调频 + light sleep：仅覆盖唤醒后的活跃段（随后进 deep sleep） */
 static void power_management_init(void)
 {
 #if CONFIG_PM_ENABLE
@@ -54,8 +59,6 @@ static void power_management_init(void)
     } else {
         ESP_LOGI(TAG, "PM: max=%dMHz min=10MHz light_sleep=on", CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
     }
-#else
-    ESP_LOGW(TAG, "CONFIG_PM_ENABLE 未开，无法自动 light sleep");
 #endif
 }
 
@@ -67,37 +70,73 @@ static void check_local_token(void)
     }
 }
 
+static void enter_deep_sleep(uint64_t work_elapsed_us)
+{
+    int64_t period_us = (int64_t)THP_REPORT_PERIOD_MS * 1000LL;
+    int64_t sleep_us = period_us - (int64_t)work_elapsed_us;
+    int64_t min_us = (int64_t)THP_DEEP_SLEEP_MIN_MS * 1000LL;
+    if (sleep_us < min_us) {
+        ESP_LOGW(TAG, "活跃段过长(%lldms)，压缩睡眠到 %dms",
+                 (long long)(work_elapsed_us / 1000), THP_DEEP_SLEEP_MIN_MS);
+        sleep_us = min_us;
+    }
+
+    thp_wifi_radio_off();
+    thp_time_rtc_save(sleep_us);
+
+    ESP_LOGI(TAG, "进入 deep sleep %lldms（周期 %dms，活跃 %lldms）",
+             (long long)(sleep_us / 1000), THP_REPORT_PERIOD_MS,
+             (long long)(work_elapsed_us / 1000));
+
+    /* 给串口冲出去一点时间 */
+    fflush(stdout);
+    esp_sleep_enable_timer_wakeup((uint64_t)sleep_us);
+    esp_deep_sleep_start();
+}
+
 void app_main(void)
 {
-    ESP_LOGI(TAG, "THP Dash 设备端启动  period=%dms  base=%s",
+    const bool from_sleep = thp_sched_wake_from_sleep();
+    ESP_LOGI(TAG, "THP Dash 设备端启动  %s  period=%dms  base=%s",
+             from_sleep ? "deep-sleep 唤醒" : "上电/复位",
              THP_REPORT_PERIOD_MS, THP_API_BASE);
     check_local_token();
 
     nvs_init();
     power_management_init();
 
+    if (from_sleep) {
+        thp_time_rtc_restore();
+    }
+
     if (thp_sensors_init() != ESP_OK) {
         ESP_LOGE(TAG, "传感器总线初始化失败");
     }
-
     if (thp_queue_init() != ESP_OK) {
-        ESP_LOGE(TAG, "离线队列互斥锁创建失败");
+        ESP_LOGE(TAG, "离线队列初始化失败");
     }
     if (thp_report_init() != ESP_OK) {
         ESP_LOGE(TAG, "上报网络锁创建失败");
     }
 
-    /* Wi-Fi 首次超时也继续：事件回调后台重连；任务内无网则采样入队 */
+    int64_t t0 = esp_timer_get_time();
+
     if (thp_wifi_init_sta() != ESP_OK) {
-        ESP_LOGW(TAG, "Wi-Fi 首次未就绪，调度任务仍启动，断网读数入离线队列");
+        ESP_LOGW(TAG, "Wi-Fi 未就绪，本唤醒采样入离线队列");
     }
 
-    thp_time_sntp_start();
-    thp_report_probe_api();
+    /* 上电：完整校时 + 连通性探测；timer 唤醒：只 ensure SNTP，省 probe */
+    if (!from_sleep) {
+        thp_time_sntp_start();
+        thp_report_probe_api();
+    } else {
+        thp_time_sntp_ensure();
+    }
 
     (void)thp_mi_init();
 
-    thp_sched_start_task();
-    ESP_LOGI(TAG, "已启动单周期调度任务 thp_cycle（LOCAL%s）",
-             thp_mi_is_ready() ? " + MI" : "");
+    thp_sched_run_once();
+
+    int64_t elapsed_us = esp_timer_get_time() - t0;
+    enter_deep_sleep(elapsed_us > 0 ? (uint64_t)elapsed_us : 0);
 }

@@ -1,6 +1,7 @@
 #include "thp_sched.h"
 
 #include "esp_log.h"
+#include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -17,38 +18,27 @@
 
 static const char *TAG = "thp.sched";
 
-#ifndef THP_REPORT_FIRST_DELAY_MS
-#define THP_REPORT_FIRST_DELAY_MS 5000
-#endif
-#ifndef THP_REPORT_PERIOD_MS
-#define THP_REPORT_PERIOD_MS (5 * 60 * 1000)
-#endif
-#ifndef THP_CYCLE_DEADLINE_MARGIN_MS
-#define THP_CYCLE_DEADLINE_MARGIN_MS 20000
-#endif
 #ifndef THP_OFFLINE_FLUSH_MAX_PER_CYCLE
-#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE 24
+#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE 16
 #endif
-#ifndef THP_MI_SCAN_OPEN_BEFORE_MS
-#define THP_MI_SCAN_OPEN_BEFORE_MS 5000
-#endif
-#ifndef THP_MI_SCAN_CLOSE_AFTER_MS
-#define THP_MI_SCAN_CLOSE_AFTER_MS 10000
-#endif
-#define THP_FLUSH_MIN_REMAIN_MS 10000
-/* 占空比：T 前拉起 Wi-Fi 的提前量（连接 1~5s + 余量） */
-#define THP_WIFI_LEAD_MS 8000
+#define THP_FLUSH_MIN_REMAIN_MS 8000
+
+bool thp_sched_wake_from_sleep(void)
+{
+    /* IDF 6：causes 为 bit mask */
+    return (esp_sleep_get_wakeup_causes() & (1u << ESP_SLEEP_WAKEUP_TIMER)) != 0;
+}
 
 static void stage_time(void)
 {
     (void)thp_time_sync_before_report();
 }
 
-static void stage_local(TickType_t deadline)
+static void stage_local(void)
 {
     thp_sample_t sample;
     if (!thp_sensors_sample(&sample)) {
-        ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL 上报");
+        ESP_LOGW(TAG, "本唤醒无有效本机采样，跳过 LOCAL 上报");
         return;
     }
 
@@ -61,11 +51,10 @@ static void stage_local(TickType_t deadline)
     reading.has_th = sample.has_th;
     reading.has_p = sample.has_p;
 
-    ESP_LOGI(TAG, "采样[LOCAL]%s%s iso=%s → %s (deadline 剩余 %dms)",
+    ESP_LOGI(TAG, "采样[LOCAL]%s%s iso=%s → %s",
              sample.has_th ? " T/H" : "",
              sample.has_p ? " P" : "",
-             reading.has_iso ? reading.iso : "(no-ts)", THP_API_BASE,
-             (int)thp_deadline_remain_ms(deadline));
+             reading.has_iso ? reading.iso : "(no-ts)", THP_API_BASE);
     if (sample.has_th) {
         ESP_LOGI(TAG, "  温湿度 T=%.2f°C H=%.2f%%",
                  (double)sample.temperature, (double)sample.humidity);
@@ -74,166 +63,53 @@ static void stage_local(TickType_t deadline)
         ESP_LOGI(TAG, "  气压 P=%.2fhPa", (double)sample.pressure);
     }
 
+    /* deadline 用当前 tick + 剩余预算（唤醒内一次做完，不跨周期） */
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_REPORT_MAX_RETRIES * THP_HTTP_TIMEOUT_MS + 8000);
     thp_report_or_enqueue(&reading, deadline);
 }
 
-static void stage_flush(TickType_t deadline)
+static void stage_mi(void)
 {
-    if (thp_deadline_reached(deadline) ||
-        thp_deadline_remain_ms(deadline) < THP_FLUSH_MIN_REMAIN_MS) {
-        ESP_LOGW(TAG, "跳过补传：剩余预算 %dms < %dms",
-                 (int)thp_deadline_remain_ms(deadline), THP_FLUSH_MIN_REMAIN_MS);
+    if (!thp_mi_is_ready()) {
         return;
     }
+    int64_t ref_ms = esp_timer_get_time() / 1000;
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS + 4000);
+    thp_mi_scan_window_realign(ref_ms);
+    thp_mi_report_cycle(ref_ms, deadline);
+    thp_mi_scan_window_close();
+}
+
+static void stage_flush(void)
+{
+    TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS + 4000);
+    unsigned pending = thp_queue_count();
+    if (pending == 0) {
+        return;
+    }
+    /* 有积压时再给一些预算；仍受 report 内 deadline 约束 */
+    deadline = xTaskGetTickCount() +
+               pdMS_TO_TICKS((THP_HTTP_TIMEOUT_MS + 2000) * (THP_OFFLINE_FLUSH_MAX_PER_CYCLE + 2));
+    ESP_LOGI(TAG, "补传预算内处理积压 %u 条（上限 %d）",
+             pending, THP_OFFLINE_FLUSH_MAX_PER_CYCLE);
     thp_report_flush_queue(THP_OFFLINE_FLUSH_MAX_PER_CYCLE, deadline);
 }
 
-static TickType_t cycle_deadline(TickType_t cycle_start)
+void thp_sched_run_once(void)
 {
-    TickType_t period_ticks = pdMS_TO_TICKS(THP_REPORT_PERIOD_MS);
-    TickType_t margin = pdMS_TO_TICKS(THP_CYCLE_DEADLINE_MARGIN_MS);
-    if (period_ticks <= margin) {
-        return cycle_start + period_ticks;
-    }
-    return cycle_start + (period_ticks - margin);
-}
-
-static void sleep_until_tick(TickType_t target)
-{
-    TickType_t now = xTaskGetTickCount();
-    if ((int32_t)(target - now) > 0) {
-        vTaskDelay(target - now);
-    }
-}
-
-static void run_one_cycle(unsigned cycle_no, TickType_t cycle_start_tick)
-{
-    TickType_t deadline = cycle_deadline(cycle_start_tick);
-    TickType_t period_ticks = pdMS_TO_TICKS(THP_REPORT_PERIOD_MS);
-    const bool mi_on = thp_mi_is_ready();
-    /* 开窗用的 est_ref 可能与真实 T 偏差 >1s（sleep 过冲/重对齐）；
-     * 此处以真实 T 重算窗边界，与后面 pop_window_best 共用同一 ref */
-    int64_t cycle_ref_ms = esp_timer_get_time() / 1000;
-    if (mi_on) {
-        thp_mi_scan_window_realign(cycle_ref_ms);
-    }
-
     thp_report_new_cycle();
 
-    ESP_LOGI(TAG, "—— 周期 #%u 开始 heap=%u wifi=%d queue=%u mi=%d deadline_in=%dms ——",
-             cycle_no,
+    ESP_LOGI(TAG, "—— 唤醒工作开始 heap=%u wifi=%d queue=%u ——",
              (unsigned)esp_get_free_heap_size(),
              (int)thp_wifi_is_connected(),
-             thp_queue_count(),
-             (int)mi_on,
-             (int)thp_deadline_remain_ms(deadline));
+             thp_queue_count());
 
     stage_time();
-    stage_local(deadline);
+    stage_local();
+    stage_mi();
+    stage_flush();
 
-    if (mi_on) {
-        /* BLE 窗口采集到 T+10s 再取距 T 最近的帧 */
-        TickType_t win_close = cycle_start_tick + pdMS_TO_TICKS(THP_MI_SCAN_CLOSE_AFTER_MS);
-        sleep_until_tick(win_close);
-        thp_mi_report_cycle(cycle_ref_ms, deadline);
-        thp_mi_scan_window_close();
-    }
-
-    stage_flush(deadline);
-
-    ESP_LOGI(TAG, "—— 周期 #%u 结束 heap=%u queue=%u stack_hwm=%u ——",
-             cycle_no,
+    ESP_LOGI(TAG, "—— 唤醒工作结束 heap=%u queue=%u ——",
              (unsigned)esp_get_free_heap_size(),
-             thp_queue_count(),
-             (unsigned)uxTaskGetStackHighWaterMark(NULL));
-
-    TickType_t elapsed = xTaskGetTickCount() - cycle_start_tick;
-    TickType_t next_start = cycle_start_tick + period_ticks;
-    TickType_t now = xTaskGetTickCount();
-
-    /* 射频空闲关闭，配合 PM light sleep */
-    thp_wifi_radio_off();
-
-    TickType_t next_radio = next_start - pdMS_TO_TICKS(THP_WIFI_LEAD_MS);
-    if ((int32_t)(next_radio - now) > 0) {
-        TickType_t remain = next_radio - now;
-        ESP_LOGI(TAG, "本周期耗时 %ums，%ums 后拉起 Wi-Fi 进入下一周期",
-                 (unsigned)(elapsed * portTICK_PERIOD_MS),
-                 (unsigned)(remain * portTICK_PERIOD_MS));
-        vTaskDelay(remain);
-    } else {
-        ESP_LOGW(TAG, "本周期耗时 %ums，已越过下一 Wi-Fi 预热点，立即拉起",
-                 (unsigned)(elapsed * portTICK_PERIOD_MS));
-    }
-}
-
-static void thp_sched_task(void *arg)
-{
-    (void)arg;
-    unsigned cycle_no = 0;
-    TickType_t period_ticks = pdMS_TO_TICKS(THP_REPORT_PERIOD_MS);
-
-    ESP_LOGI(TAG, "调度启动：period=%dms margin=%dms wifi_lead=%dms mi=%d first_delay=%dms",
-             THP_REPORT_PERIOD_MS, THP_CYCLE_DEADLINE_MARGIN_MS,
-             THP_WIFI_LEAD_MS, (int)thp_mi_is_ready(),
-             THP_REPORT_FIRST_DELAY_MS);
-
-    /* 首周期：first_delay 后到达 T0 */
-    vTaskDelay(pdMS_TO_TICKS(THP_REPORT_FIRST_DELAY_MS));
-    TickType_t next_start = xTaskGetTickCount();
-
-    while (1) {
-        const bool mi_on = thp_mi_is_ready();
-        TickType_t wifi_at = next_start - pdMS_TO_TICKS(THP_WIFI_LEAD_MS);
-        TickType_t open_at = next_start - pdMS_TO_TICKS(THP_MI_SCAN_OPEN_BEFORE_MS);
-
-        /* 占空比：先保证 Wi-Fi 在 T 前就绪；MI 窗仍按 T-5s */
-        TickType_t arm_at = wifi_at;
-        if (mi_on && (int32_t)(open_at - wifi_at) < 0) {
-            arm_at = open_at;
-        }
-        sleep_until_tick(arm_at);
-
-        if ((int32_t)(xTaskGetTickCount() - wifi_at) >= 0 || !mi_on) {
-            /* 到 Wi-Fi 预热点（或无 MI 时）拉起射频 */
-            esp_err_t werr = thp_wifi_radio_on(THP_WIFI_CONNECT_TIMEOUT_MS);
-            if (werr != ESP_OK) {
-                ESP_LOGW(TAG, "本周期 Wi-Fi 未就绪，读数将入离线队列");
-            }
-        }
-
-        if (mi_on) {
-            sleep_until_tick(open_at);
-            TickType_t now = xTaskGetTickCount();
-            int64_t est_ref_ms;
-            if ((int32_t)(next_start - now) > 0) {
-                est_ref_ms = esp_timer_get_time() / 1000 +
-                             (int64_t)((next_start - now) * portTICK_PERIOD_MS);
-            } else {
-                est_ref_ms = esp_timer_get_time() / 1000;
-            }
-            thp_mi_scan_window_open(est_ref_ms);
-        }
-
-        sleep_until_tick(next_start);
-
-        TickType_t cycle_start = xTaskGetTickCount();
-        /* 若迟到，以实际起点重对齐下一周期 */
-        if ((int32_t)(cycle_start - next_start) > pdMS_TO_TICKS(1000)) {
-            next_start = cycle_start;
-        }
-
-        cycle_no++;
-        run_one_cycle(cycle_no, next_start);
-        next_start = next_start + period_ticks;
-    }
-}
-
-void thp_sched_start_task(void)
-{
-    /* 单任务：TLS/队列无跨任务争用；栈 8K 覆盖 HTTP + JSON（观察 stack_hwm 后再调） */
-    BaseType_t ok = xTaskCreate(thp_sched_task, "thp_cycle", 8192, NULL, 5, NULL);
-    if (ok != pdPASS) {
-        ESP_LOGE(TAG, "创建调度任务失败");
-    }
+             thp_queue_count());
 }
