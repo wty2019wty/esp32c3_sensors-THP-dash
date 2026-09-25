@@ -100,7 +100,7 @@
  * 云端零改动：Dash 里另建设备并生成 Token。
  */
 #ifndef THP_MI_ENABLE
-#define THP_MI_ENABLE 1
+#define THP_MI_ENABLE 0
 #endif
 
 /* Dash 为小米计生成的上报 Token（与 THP_DEVICE_TOKEN 分开） */
