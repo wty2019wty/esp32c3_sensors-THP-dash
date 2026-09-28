@@ -40,15 +40,26 @@ function viewportWidth() {
 /** Adaptive chart CSS height for the current viewport width. */
 export function chartCssHeight(kind) {
   const w = viewportWidth();
+  const h = (typeof window !== 'undefined' && window.innerHeight) || 900;
   if (kind === 'split') {
     if (w <= 360) return 130;
     if (w <= 480) return 140;
     if (w <= 640) return 160;
+    if (w > 960) {
+      // 三张分图均分屏幕剩余高度
+      const per = Math.floor((h - 340) / 3);
+      return Math.max(180, Math.min(300, per));
+    }
     return CSS_HEIGHT.split;
   }
   if (w <= 360) return 220;
   if (w <= 480) return 260;
   if (w <= 640) return 300;
+  if (w > 960) {
+    // PC：尽量吃满视口剩余高度
+    const avail = h - 300;
+    return Math.max(380, Math.min(720, avail));
+  }
   return CSS_HEIGHT.combined;
 }
 

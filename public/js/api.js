@@ -1,5 +1,7 @@
 /** API client for THP Dash. Same-origin Worker by default. */
 
+const DEMO_FLAG = 'thp_demo_on';
+
 let csrf = '';
 let demoMode = false;
 
@@ -9,6 +11,28 @@ export function isDemo() {
 
 export function setDemo(on) {
   demoMode = !!on;
+  try {
+    if (demoMode) sessionStorage.setItem(DEMO_FLAG, '1');
+    else sessionStorage.removeItem(DEMO_FLAG);
+  } catch {
+    /* ignore */
+  }
+  document.body.classList.toggle('demo-mode', demoMode);
+  const banner = document.getElementById('demo-banner');
+  if (banner) banner.hidden = !demoMode;
+}
+
+/** Restore demo mode after a page navigation (same tab). */
+export function restoreDemo() {
+  try {
+    if (sessionStorage.getItem(DEMO_FLAG) === '1') {
+      setDemo(true);
+      return true;
+    }
+  } catch {
+    /* ignore */
+  }
+  return false;
 }
 
 export function setCsrf(token) {
@@ -30,7 +54,7 @@ export function syncCsrfFromCookie() {
 }
 
 async function request(path, { method = 'GET', body, auth = true, raw = false } = {}) {
-  if (demoMode && !path.startsWith('/demo')) {
+  if (demoMode) {
     const demo = await import('./demo.js');
     return demo.handle(path, method, body);
   }

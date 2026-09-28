@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="THP Dash">
+  <defs>
+    <linearGradient id="bg" x1="6" y1="2" x2="58" y2="62" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#17253c"/>
+      <stop offset="1" stop-color="#0b1220"/>
+    </linearGradient>
+    <linearGradient id="line" x1="32" y1="44" x2="56" y2="16" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#3db8f0"/>
+      <stop offset="1" stop-color="#6ea8ff"/>
+    </linearGradient>
+  </defs>
+
+  <!-- chassis -->
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+  <rect x="0.75" y="0.75" width="62.5" height="62.5" rx="13.25" fill="none" stroke="#243044" stroke-width="1.5"/>
+
+  <!-- live series -->
+  <path d="M31 46 C36 46 38 38 42 33 C45 29 48 20 54 18"
+        fill="none" stroke="url(#line)" stroke-width="3.8"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="54" cy="18" r="4.2" fill="#6ea8ff"/>
+  <circle cx="54" cy="18" r="1.8" fill="#e8f2ff"/>
+
+  <!-- thermometer -->
+  <rect x="14.5" y="12" width="13" height="30" rx="6.5" fill="#121a2b" stroke="#e8eef5" stroke-width="2.4"/>
+  <circle cx="21" cy="44.5" r="11.5" fill="#121a2b" stroke="#e8eef5" stroke-width="2.4"/>
+
+  <!-- mercury -->
+  <rect x="17.8" y="28" width="6.4" height="14" rx="3.2" fill="#f0b429"/>
+  <circle cx="21" cy="44.5" r="7" fill="#f0b429"/>
+  <circle cx="18.2" cy="41.8" r="2.2" fill="#f5d78e" opacity="0.7"/>
+
+  <!-- stem ticks -->
+  <path d="M28 20h3.2M28 26h2.6M28 32h3.2" stroke="#8b9bb4" stroke-width="1.7" stroke-linecap="round" opacity="0.9"/>
+</svg>
