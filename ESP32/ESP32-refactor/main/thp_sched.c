@@ -38,33 +38,43 @@ static const char *TAG = "thp.sched";
 #endif
 #define THP_FLUSH_MIN_REMAIN_MS 10000
 
-static void stage_local(TickType_t deadline)
+/**
+ * LOCAL：T 时刻只采样不发 HTTP，避免 TLS 重试占满 BLE 窗并 stop_scan。
+ * 组帧放到窗口关闭后 stage_local_report。
+ */
+static bool stage_local_sample(thp_sample_t *out)
 {
     if (!thp_source_ready(0)) {
-        ESP_LOGW(TAG, "LOCAL 源未就绪，跳过本周期采样上报");
-        return;
+        ESP_LOGW(TAG, "LOCAL 源未就绪，跳过本周期采样");
+        return false;
     }
-    thp_sample_t sample;
-    if (!thp_local_sample(&sample)) {
-        ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL 上报");
-        return;
+    if (!thp_local_sample(out)) {
+        ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL");
+        return false;
     }
+    ESP_LOGI(TAG, "采样[local]%s%s（HTTP 留到 BLE 窗结束后）",
+             out->has_th ? " T/H" : "",
+             out->has_p ? " P" : "");
+    return true;
+}
 
+static void stage_local_report(const thp_sample_t *sample, TickType_t deadline)
+{
+    if (sample == NULL || !sample->valid) {
+        return;
+    }
     thp_reading_t reading;
     thp_time_stamp_reading(&reading);
     reading.source_id = 0;
-    reading.temperature = sample.temperature;
-    reading.humidity = sample.humidity;
-    reading.pressure = sample.pressure;
-    reading.has_th = sample.has_th;
-    reading.has_p = sample.has_p;
+    reading.temperature = sample->temperature;
+    reading.humidity = sample->humidity;
+    reading.pressure = sample->pressure;
+    reading.has_th = sample->has_th;
+    reading.has_p = sample->has_p;
 
-    ESP_LOGI(TAG, "采样[local]%s%s iso=%s (deadline 剩余 %dms)",
-             sample.has_th ? " T/H" : "",
-             sample.has_p ? " P" : "",
+    ESP_LOGI(TAG, "上报[local] iso=%s (deadline 剩余 %dms)",
              reading.has_iso ? reading.iso : "(no-ts)",
              (int)thp_deadline_remain_ms(deadline));
-
     thp_report_or_enqueue(&reading, deadline);
 }
 
@@ -114,14 +124,22 @@ static void run_one_cycle(unsigned cycle_no, TickType_t cycle_start_tick)
              (int)thp_ble_is_ready(),
              (int)thp_deadline_remain_ms(deadline));
 
+    /* 窗内禁止 HTTP/NTP：只采样 + 扫 BLE，避免 stop_scan/重试饿死窗口 */
+    thp_sample_t local_sample;
+    bool has_local = stage_local_sample(&local_sample);
+
+    if (thp_ble_is_ready()) {
+        TickType_t win_close = cycle_start_tick + pdMS_TO_TICKS(THP_BLE_SCAN_CLOSE_AFTER_MS);
+        sleep_until_tick(win_close);
+        thp_ble_scan_window_close();
+    }
+
+    /* 窗口已关，再校时并串行上报（LOCAL → 各 BLE → 补传） */
     (void)thp_time_sync_before_report();
-    stage_local(deadline);
-
-    TickType_t win_close = cycle_start_tick + pdMS_TO_TICKS(THP_BLE_SCAN_CLOSE_AFTER_MS);
-    sleep_until_tick(win_close);
-
+    if (has_local) {
+        stage_local_report(&local_sample, deadline);
+    }
     thp_ble_report_cycle(cycle_ref_ms, deadline);
-    thp_ble_scan_window_close();
 
     stage_flush(deadline);
 

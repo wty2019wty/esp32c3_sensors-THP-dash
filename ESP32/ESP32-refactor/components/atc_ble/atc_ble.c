@@ -587,7 +587,10 @@ static int gap_on_event(struct ble_gap_event *event, void *arg)
         return 0;
     }
     case BLE_GAP_EVENT_DISC_COMPLETE:
+        /* 回调内不调 GAP API；仅原子复位 scanning 标志 */
+        portENTER_CRITICAL(&s_lock);
         s_scanning = false;
+        portEXIT_CRITICAL(&s_lock);
         return 0;
     default:
         return 0;
@@ -599,7 +602,10 @@ static void start_scan_locked(void)
     if (!s_synced || !s_scan_wanted) {
         return;
     }
-    if (s_scanning) {
+    portENTER_CRITICAL(&s_lock);
+    bool already = s_scanning;
+    portEXIT_CRITICAL(&s_lock);
+    if (already) {
         return;
     }
     struct ble_gap_disc_params p;
@@ -612,23 +618,32 @@ static void start_scan_locked(void)
     p.limited = 0;
 
     int rc = ble_gap_disc(s_own_addr_type, BLE_HS_FOREVER, &p, gap_on_event, NULL);
+    portENTER_CRITICAL(&s_lock);
     if (rc == 0) {
         s_scanning = true;
+        portEXIT_CRITICAL(&s_lock);
         if (!s_scan_announced) {
             s_scan_announced = true;
             ESP_LOGI(TAG, "ATC BLE 扫描开始（%u 设备，窗口模式）", (unsigned)s_ndev);
         }
-    } else if (rc != BLE_HS_EALREADY) {
-        ESP_LOGW(TAG, "ble_gap_disc rc=%d", rc);
+    } else {
+        portEXIT_CRITICAL(&s_lock);
+        if (rc != BLE_HS_EALREADY) {
+            ESP_LOGW(TAG, "ble_gap_disc rc=%d", rc);
+        }
     }
 }
 
-/** 在持锁状态下调用：停扫并复位 scanning */
+/** 在持 scan_mtx 状态下调用：停扫并复位 scanning */
 static void stop_scan_locked(void)
 {
-    if (s_scanning) {
+    bool was;
+    portENTER_CRITICAL(&s_lock);
+    was = s_scanning;
+    s_scanning = false;
+    portEXIT_CRITICAL(&s_lock);
+    if (was) {
         ble_gap_disc_cancel();
-        s_scanning = false;
     }
 }
 
@@ -699,7 +714,9 @@ static void on_reset(int reason)
 {
     ESP_LOGW(TAG, "NimBLE reset reason=%d", reason);
     s_synced = false;
+    portENTER_CRITICAL(&s_lock);
     s_scanning = false;
+    portEXIT_CRITICAL(&s_lock);
 }
 
 static void host_task(void *param)
@@ -884,8 +901,13 @@ esp_err_t atc_ble_resume_scan_if_wanted(void)
         return ESP_OK;
     }
     if (window_expired_by_wallclock()) {
+        /* 持锁内过期收束，避免解锁 TOCTOU 后误伤新窗 */
+        portENTER_CRITICAL(&s_lock);
+        s_window_active = false;
+        portEXIT_CRITICAL(&s_lock);
+        s_scan_wanted = false;
+        stop_scan_locked();
         scan_unlock();
-        window_expire_if_due();
         return ESP_OK;
     }
     s_scan_wanted = true;
@@ -920,5 +942,16 @@ void atc_ble_clear_cache(void)
 
 bool atc_ble_is_scanning(void)
 {
-    return s_scanning;
+    portENTER_CRITICAL(&s_lock);
+    bool v = s_scanning;
+    portEXIT_CRITICAL(&s_lock);
+    return v;
+}
+
+bool atc_ble_window_is_open(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    bool v = s_window_active;
+    portEXIT_CRITICAL(&s_lock);
+    return v;
 }

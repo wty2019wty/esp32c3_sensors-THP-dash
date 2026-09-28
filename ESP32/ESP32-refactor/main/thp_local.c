@@ -59,6 +59,24 @@ static void i2c_lines_selftest(void)
     }
 }
 
+/** 读路径全失败：摘除句柄，下一周期热修复可重新 probe/add */
+static void local_drop_sensor(sht40_t *sht, bmp280_t *bmp, bool is_sht)
+{
+    if (is_sht) {
+        if (sht->dev != NULL) {
+            i2c_master_bus_rm_device(sht->dev);
+            sht->dev = NULL;
+        }
+        sht->present = false;
+    } else {
+        if (bmp->dev != NULL) {
+            i2c_master_bus_rm_device(bmp->dev);
+            bmp->dev = NULL;
+        }
+        bmp->present = false;
+    }
+}
+
 static void sensors_retry_init_if_missing(void)
 {
     /* 驱动 init 失败路径会 remove_device；此处仅在完全无句柄时重试 */
@@ -197,6 +215,9 @@ bool thp_local_sample(thp_sample_t *out)
         out->humidity = sht_h;
     } else if (sht_ok) {
         ESP_LOGW(TAG, "温湿度超范围: T=%.2f H=%.2f", (double)sht_t, (double)sht_h);
+    } else if (s_sht.present) {
+        ESP_LOGW(TAG, "SHT40 本周期读全失败，摘除句柄待热修复");
+        local_drop_sensor(&s_sht, &s_bmp, true);
     }
 
     if (bmp_ok && thp_p_in_range(bmp_p)) {
@@ -204,6 +225,9 @@ bool thp_local_sample(thp_sample_t *out)
         out->pressure = bmp_p;
     } else if (bmp_ok) {
         ESP_LOGW(TAG, "气压超范围: P=%.2f", (double)bmp_p);
+    } else if (s_bmp.present) {
+        ESP_LOGW(TAG, "BMP280 本周期读全失败，摘除句柄待热修复");
+        local_drop_sensor(&s_sht, &s_bmp, false);
     }
 
     out->valid = out->has_th || out->has_p;

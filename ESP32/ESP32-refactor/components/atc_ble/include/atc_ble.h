@@ -48,6 +48,7 @@ esp_err_t atc_ble_resume_scan_if_wanted(void);
 bool      atc_ble_pop_latest(size_t dev_index, atc_ble_sample_t *out);
 void      atc_ble_clear_cache(void);
 bool      atc_ble_is_scanning(void);
+bool      atc_ble_window_is_open(void);
 size_t    atc_ble_device_count(void);
 
 bool atc_ble_parse_mac_str(const char *s, uint8_t out[6]);

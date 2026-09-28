@@ -481,6 +481,11 @@ void thp_report_or_enqueue(const thp_reading_t *r, TickType_t deadline)
                  thp_source_name(r->source_id));
         thp_queue_clear_source(r->source_id);
         thp_source_set_ready(r->source_id, false);
+    } else if (res == THP_HTTP_BAD_PAYLOAD) {
+        ESP_LOGW(TAG, "丢弃非法载荷 src=%s iso=%s th=%d p=%d",
+                 thp_source_name(r->source_id),
+                 r->has_iso ? r->iso : "(no-ts)",
+                 (int)r->has_th, (int)r->has_p);
     }
 }
 
@@ -529,6 +534,9 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
             continue;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
+            ESP_LOGW(TAG, "补传条非法丢弃 src=%s iso=%s",
+                     thp_source_name(item.source_id),
+                     item.has_iso ? item.iso : "(no-ts)");
             thp_queue_pop();
             continue;
         }

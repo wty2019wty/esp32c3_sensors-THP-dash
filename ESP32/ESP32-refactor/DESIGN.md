@@ -61,18 +61,20 @@
 }
 ```
 
-## 调度（与原版对齐）
+## 调度（窗内零 HTTP）
 
 | 阶段 | 时刻 | 行为 |
 |------|------|------|
 | 0 开 BLE 窗 | T−5s | 所有配置的 BLE 设备共用一次扫描 |
-| 1 校时 | T | SNTP，已同步短路 |
-| 2 LOCAL | T | I2C 采样 → source 0 上报或入队 |
-| 3 BLE | T+10s | 关窗后**按设备**取最佳帧 → 各自上报或入队 |
-| 4 补传 | 之后 | 最多 `THP_OFFLINE_FLUSH_MAX_PER_CYCLE` 条 |
+| 1 LOCAL 采样 | T | **仅 I2C**，不发 HTTP（避免 TLS 重试 + stop_scan 饿死窗口） |
+| 2 等窗 | T→T+10s | 纯扫描收集；禁止 NTP/HTTP |
+| 3 关窗 + 校时 | T+10s | 关 BLE 窗 → SNTP（已同步短路） |
+| 4 上报 | 之后 | LOCAL → 各 BLE 最佳帧 → 补传 |
 | 5 睡眠 | — | 睡到下一 T′−5s |
 
 deadline = `period − margin`；耗尽时不再 HTTP，读数仍入队。
+
+**设计意图**：C3 单射频，HTTP `perform` 会 `stop_scan`。若 LOCAL 在窗内带重试上报，TLS 超时×4 可吃掉整个 15s 扫描窗（现场已复现 `win_n=0`）。故采样与上报解耦。
 
 ## 相对原版的行为差异
 
@@ -90,5 +92,5 @@ deadline = `period − margin`；耗尽时不再 HTTP，读数仍入队。
 3. 范围校验：T −40~85，H 0~100，P 300~1200
 4. 实时上报不带 `ts`；离线补传带采样时刻 UTC `ts`
 5. 401/403/400 不重试；网络/5xx 有限指数退避
-6. HTTP perform 期间停 BLE 扫描，结束后若仍在窗内则恢复
+6. HTTP perform 期间停 BLE 扫描；**扫描窗内不发起 HTTP/NTP**
 7. Token 401/403：仅清该源积压，并停用该源（`thp_source_set_ready(false)`），避免每周期空打

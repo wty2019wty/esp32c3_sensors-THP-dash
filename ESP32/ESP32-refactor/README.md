@@ -86,8 +86,8 @@ Content-Type: application/json
 
 ## 调度摘要
 
-单任务 `thp_cycle`：T−5s 开 BLE 窗（一次扫描收所有设备）→ T 校时+LOCAL 上报 → T+10s
-关窗后逐 BLE 设备上报 → 补传 → 睡到下窗。当前周期新鲜数据优先。
+单任务 `thp_cycle`：T−5s 开 BLE 窗 → T 仅 I2C 采样 → T+10s 关窗后校时，再按
+LOCAL → 各 BLE → 补传 串行 HTTP。**扫描窗内不做 HTTP/NTP**，避免 TLS 重试饿死 BLE。
 
 ## 串口要点
 
