@@ -24,8 +24,11 @@ const char *thp_source_device_id(uint8_t source_id);
 /** BLE 源在 atc_ble 设备表中的下标；非 BLE 源返回 -1 */
 int thp_source_ble_index(uint8_t source_id);
 
-/** 源 id 是否有效且 Token 可用 */
+/** 源 id 是否有效且 Token 可用（Token 失效后会被置 false） */
 bool thp_source_ready(uint8_t source_id);
+
+/** Token 401/403 后停用/恢复该源，避免每周期空打 HTTP */
+void thp_source_set_ready(uint8_t source_id, bool ready);
 
 /** 打印源表摘要 */
 void thp_sources_dump(void);

@@ -10,7 +10,6 @@
 #include "freertos/task.h"
 
 #define ISO_UTC_BUF_LEN 32
-#define THP_SOURCE_NAME_LEN 16
 
 /** 绝对 tick deadline：已到/已过返回 true（tick 回绕安全） */
 static inline bool thp_deadline_reached(TickType_t deadline)

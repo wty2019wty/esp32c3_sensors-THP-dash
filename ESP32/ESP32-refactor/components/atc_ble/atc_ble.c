@@ -17,6 +17,7 @@
 #include "esp_timer.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "psa/crypto.h"
 #include "nimble/nimble_port.h"
@@ -60,6 +61,7 @@ static volatile bool s_synced;
 static volatile bool s_scan_wanted;
 static bool s_scan_announced;
 static uint8_t s_own_addr_type;
+static SemaphoreHandle_t s_scan_mtx;
 
 #define ATC_WINDOW_RING_N 48
 static atc_ble_sample_t s_win_ring[ATC_WINDOW_RING_N];
@@ -74,6 +76,20 @@ static int64_t s_window_close_after_ms;
 static int gap_on_event(struct ble_gap_event *event, void *arg);
 static void start_scan_locked(void);
 static void scan_sup_task(void *arg);
+
+static void scan_lock(void)
+{
+    if (s_scan_mtx) {
+        xSemaphoreTake(s_scan_mtx, portMAX_DELAY);
+    }
+}
+
+static void scan_unlock(void)
+{
+    if (s_scan_mtx) {
+        xSemaphoreGive(s_scan_mtx);
+    }
+}
 
 /* ---------------- helpers ---------------- */
 
@@ -607,6 +623,15 @@ static void start_scan_locked(void)
     }
 }
 
+/** 在持锁状态下调用：停扫并复位 scanning */
+static void stop_scan_locked(void)
+{
+    if (s_scanning) {
+        ble_gap_disc_cancel();
+        s_scanning = false;
+    }
+}
+
 static bool window_expired_by_wallclock(void)
 {
     if (!s_window_active) {
@@ -620,14 +645,13 @@ static void window_expire_if_due(void)
     if (!window_expired_by_wallclock()) {
         return;
     }
+    scan_lock();
     portENTER_CRITICAL(&s_lock);
     s_window_active = false;
     portEXIT_CRITICAL(&s_lock);
     s_scan_wanted = false;
-    if (s_scanning) {
-        ble_gap_disc_cancel();
-        s_scanning = false;
-    }
+    stop_scan_locked();
+    scan_unlock();
 }
 
 static void scan_sup_task(void *arg)
@@ -636,9 +660,11 @@ static void scan_sup_task(void *arg)
     int beat = 0;
     for (;;) {
         window_expire_if_due();
+        scan_lock();
         if (s_inited && s_synced && s_scan_wanted && !s_scanning) {
             start_scan_locked();
         }
+        scan_unlock();
         beat++;
         if (beat >= 15) {
             beat = 0;
@@ -711,6 +737,13 @@ esp_err_t atc_ble_init(const atc_ble_device_t *devs, size_t count)
 
     ESP_LOGI(TAG, "ATC BLE init  ndev=%u（窗口扫描，默认停扫）", (unsigned)s_ndev);
 
+    if (s_scan_mtx == NULL) {
+        s_scan_mtx = xSemaphoreCreateMutex();
+        if (s_scan_mtx == NULL) {
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
     esp_err_t err = nimble_port_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nimble_port_init: %s", esp_err_to_name(err));
@@ -742,7 +775,6 @@ void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_a
     portENTER_CRITICAL(&s_lock);
     s_win_head = 0;
     s_win_count = 0;
-    memset((void *)s_win_ring, 0, sizeof(s_win_ring));
     s_window_open_before_ms = open_before_ms;
     s_window_close_after_ms = close_after_ms;
     s_window_open_ms = open_ms;
@@ -750,6 +782,7 @@ void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_a
     s_window_active = true;
     portEXIT_CRITICAL(&s_lock);
 
+    scan_lock();
     s_scan_wanted = true;
     ESP_LOGI(TAG, "ATC BLE 窗口开启 ref=%lld open=%lld close=%lld（前%lldms~后%lldms）",
              (long long)ref_ms, (long long)open_ms, (long long)close_ms,
@@ -757,6 +790,7 @@ void atc_ble_window_open(int64_t ref_ms, int64_t open_before_ms, int64_t close_a
     if (s_synced) {
         start_scan_locked();
     }
+    scan_unlock();
 }
 
 void atc_ble_window_realign(int64_t ref_ms)
@@ -776,15 +810,14 @@ void atc_ble_window_realign(int64_t ref_ms)
 
 void atc_ble_window_close(void)
 {
+    scan_lock();
     portENTER_CRITICAL(&s_lock);
     s_window_active = false;
     portEXIT_CRITICAL(&s_lock);
     s_scan_wanted = false;
-    if (s_scanning) {
-        ble_gap_disc_cancel();
-        s_scanning = false;
-        ESP_LOGD(TAG, "ATC BLE 窗口关闭，扫描暂停");
-    }
+    stop_scan_locked();
+    scan_unlock();
+    ESP_LOGD(TAG, "ATC BLE 窗口关闭，扫描暂停");
 }
 
 bool atc_ble_pop_window_best(size_t dev_index, int64_t ref_ms, atc_ble_sample_t *out)
@@ -833,11 +866,10 @@ esp_err_t atc_ble_stop_scan(void)
     if (!s_inited) {
         return ESP_OK;
     }
+    scan_lock();
     s_scan_wanted = false;
-    if (s_scanning) {
-        ble_gap_disc_cancel();
-        s_scanning = false;
-    }
+    stop_scan_locked();
+    scan_unlock();
     return ESP_OK;
 }
 
@@ -846,10 +878,13 @@ esp_err_t atc_ble_resume_scan_if_wanted(void)
     if (!s_inited) {
         return ESP_OK;
     }
+    scan_lock();
     if (!s_window_active) {
+        scan_unlock();
         return ESP_OK;
     }
     if (window_expired_by_wallclock()) {
+        scan_unlock();
         window_expire_if_due();
         return ESP_OK;
     }
@@ -857,6 +892,7 @@ esp_err_t atc_ble_resume_scan_if_wanted(void)
     if (s_synced) {
         start_scan_locked();
     }
+    scan_unlock();
     return ESP_OK;
 }
 

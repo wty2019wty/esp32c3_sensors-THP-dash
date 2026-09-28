@@ -31,6 +31,10 @@ typedef struct {
     bool present;
 } sht40_t;
 
+/**
+ * 探测并初始化 SHT40（0x44 → 0x45）。
+ * sht 须为零初始化结构，或先前调用过本函数；重复调用会先摘旧句柄。
+ */
 esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz);
 esp_err_t sht40_read(sht40_t *sht, float *temp_c, float *humi_rh);
 uint8_t sht40_crc8(const uint8_t *data, size_t len);

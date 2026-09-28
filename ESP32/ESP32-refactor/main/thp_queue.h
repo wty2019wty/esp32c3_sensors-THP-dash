@@ -1,5 +1,8 @@
 /*
  * 离线补传队列（RAM 环形；条目带 source_id）
+ *
+ * peek_copy / pop 非原子：仅允许单一补传任务「peek → 网络 → 成功再 pop」。
+ * AUTH 失效用 clear_source 原地压缩，不依赖 pop。
  */
 #pragma once
 

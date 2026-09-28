@@ -178,22 +178,70 @@ static bool json_append(char *buf, size_t cap, size_t *used, const char *fmt, ..
     return true;
 }
 
-static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t n)
+/** 将 device_id 转义后写入 JSON 字符串字面量（不含引号） */
+static bool json_escape_into(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    if (dst == NULL || cap == 0) {
+        return false;
+    }
+    for (const char *p = src; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= cap) {
+                dst[0] = '\0';
+                return false;
+            }
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+            continue;
+        }
+        if (c < 0x20) {
+            if (o + 6 >= cap) {
+                dst[0] = '\0';
+                return false;
+            }
+            snprintf(dst + o, cap - o, "\\u%04x", (unsigned)c);
+            o += 6;
+            continue;
+        }
+        if (o + 1 >= cap) {
+            dst[0] = '\0';
+            return false;
+        }
+        dst[o++] = (char)c;
+    }
+    dst[o] = '\0';
+    return true;
+}
+
+/** 成功写出完整 metrics 与可选附加字段；metrics 为空则失败（禁止 `{,\"rssi\"…}`） */
+static bool build_json(const thp_reading_t *r, bool backfill, char *buf, size_t n)
 {
     char live_iso[ISO_UTC_BUF_LEN];
-    char device_part[96];
+    char device_part[128];
     char measured_part[64];
     char ts_part[64];
     char metrics[96];
+    char escaped_id[96];
     int rssi = r->rssi;
     size_t used = 0;
     bool metrics_ok = true;
+    bool any_metric = r->has_th || r->has_p;
+
+    if (buf == NULL || n == 0 || !any_metric) {
+        if (buf != NULL && n > 0) {
+            buf[0] = '\0';
+        }
+        return false;
+    }
 
     device_part[0] = '\0';
     {
         const char *did = thp_source_device_id(r->source_id);
-        if (did != NULL && did[0] != '\0') {
-            snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", did);
+        if (did != NULL && did[0] != '\0' &&
+            json_escape_into(escaped_id, sizeof(escaped_id), did)) {
+            snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", escaped_id);
         }
     }
 
@@ -215,6 +263,11 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
                                      "\"pressure\":%.2f", (double)r->pressure);
         }
     }
+    if (!metrics_ok) {
+        ESP_LOGE(TAG, "build_json metrics 缓冲不足，丢弃本帧");
+        buf[0] = '\0';
+        return false;
+    }
 
     if (backfill) {
         if (r->has_iso && r->iso[0] != '\0') {
@@ -225,9 +278,15 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
         snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", live_iso);
     }
 
-    snprintf(buf, n,
-             "{%s%s%s%s,\"rssi\":%d}",
-             metrics, device_part, measured_part, ts_part, rssi);
+    int wr = snprintf(buf, n,
+                      "{%s%s%s%s,\"rssi\":%d}",
+                      metrics, device_part, measured_part, ts_part, rssi);
+    if (wr <= 0 || (size_t)wr >= n) {
+        ESP_LOGE(TAG, "build_json 体超长已丢弃");
+        buf[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 static thp_http_result_t classify_status(int status)
@@ -269,7 +328,11 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     }
     snprintf(url, sizeof(url), "%.*s/api/v1/readings", (int)base_len, base);
 
-    build_json(r, backfill, body, sizeof(body));
+    if (!build_json(r, backfill, body, sizeof(body))) {
+        ESP_LOGE(TAG, "build_json 失败 src=%s，丢弃本帧", thp_source_name(r->source_id));
+        *out_status = -1;
+        return THP_HTTP_BAD_PAYLOAD;
+    }
     const char *token = thp_source_token(r->source_id);
     snprintf(auth, sizeof(auth), "Bearer %s", token);
 
@@ -336,6 +399,7 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     }
 
     int status = esp_http_client_get_status_code(client);
+    int content_len = esp_http_client_get_content_length(client);
     int read_len = esp_http_client_read(client, resp, sizeof(resp) - 1);
     if (read_len > 0) {
         resp[read_len] = '\0';
@@ -343,6 +407,10 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
         resp[0] = '\0';
     }
     esp_http_client_cleanup(client);
+
+    if (content_len > HTTP_RECV_BUF - 1) {
+        ESP_LOGW(TAG, "响应体超长已截断 (Content-Length=%d)", content_len);
+    }
 
     *out_status = status;
     ESP_LOGI(TAG, "上报[%s] HTTP %d  body=%s  resp=%s",
@@ -409,7 +477,10 @@ void thp_report_or_enqueue(const thp_reading_t *r, TickType_t deadline)
     if (res == THP_HTTP_TRANSIENT) {
         thp_queue_push(r);
     } else if (res == THP_HTTP_AUTH_FAIL) {
+        ESP_LOGE(TAG, "Token 失效 src=%s，清除积压并停用该源（需更新 Token 后重编译）",
+                 thp_source_name(r->source_id));
         thp_queue_clear_source(r->source_id);
+        thp_source_set_ready(r->source_id, false);
     }
 }
 
@@ -451,9 +522,10 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
             continue;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "补传遇 Token 失效 src=%s，仅清该源积压",
+            ESP_LOGE(TAG, "补传遇 Token 失效 src=%s，清该源积压并停用",
                      thp_source_name(item.source_id));
             thp_queue_clear_source(item.source_id);
+            thp_source_set_ready(item.source_id, false);
             continue;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {

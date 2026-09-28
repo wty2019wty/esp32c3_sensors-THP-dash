@@ -31,12 +31,14 @@ static bool s_inited;
 
 static bool token_ok(const char *t)
 {
-    return t != NULL && t[0] != '\0' &&
-           strcmp(t, "thp_replace_me") != 0 &&
-           strcmp(t, "thp_replace_me_local") != 0 &&
-           strcmp(t, "thp_replace_me_mi") != 0 &&
-           strncmp(t, "thp_replace_me", 14) != 0 &&
-           strlen(t) >= 8;
+    if (t == NULL || t[0] == '\0') {
+        return false;
+    }
+    /* 占位符统一以 thp_replace_me 开头 */
+    if (strncmp(t, "thp_replace_me", 14) == 0) {
+        return false;
+    }
+    return strlen(t) >= 8;
 }
 
 esp_err_t thp_sources_init(void)
@@ -161,6 +163,19 @@ bool thp_source_ready(uint8_t source_id)
         return false;
     }
     return s_src[source_id].ready;
+}
+
+void thp_source_set_ready(uint8_t source_id, bool ready)
+{
+    if (source_id >= s_count) {
+        return;
+    }
+    if (s_src[source_id].ready == ready) {
+        return;
+    }
+    s_src[source_id].ready = ready;
+    ESP_LOGW(TAG, "源[%u] %s -> ready=%d", (unsigned)source_id, s_src[source_id].name,
+             (int)ready);
 }
 
 void thp_sources_dump(void)

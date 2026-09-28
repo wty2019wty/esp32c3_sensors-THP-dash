@@ -61,12 +61,13 @@ static void i2c_lines_selftest(void)
 
 static void sensors_retry_init_if_missing(void)
 {
-    if (!s_sht.present) {
+    /* 驱动 init 失败路径会 remove_device；此处仅在完全无句柄时重试 */
+    if (!s_sht.present && s_sht.dev == NULL) {
         if (sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
             ESP_LOGW(TAG, "SHT40 热修复探测成功");
         }
     }
-    if (!s_bmp.present) {
+    if (!s_bmp.present && s_bmp.dev == NULL) {
         if (bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
             ESP_LOGW(TAG, "BMP280 热修复探测成功");
         }

@@ -40,6 +40,10 @@ static const char *TAG = "thp.sched";
 
 static void stage_local(TickType_t deadline)
 {
+    if (!thp_source_ready(0)) {
+        ESP_LOGW(TAG, "LOCAL 源未就绪，跳过本周期采样上报");
+        return;
+    }
     thp_sample_t sample;
     if (!thp_local_sample(&sample)) {
         ESP_LOGW(TAG, "本周期无有效本机采样，跳过 LOCAL 上报");

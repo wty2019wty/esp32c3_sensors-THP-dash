@@ -96,7 +96,7 @@ Content-Type: application/json
 | `源表: local + N BLE` | 多源注册完成 |
 | `BLE[i] 窗口样本 ...` | 第 i 台设备取到帧 |
 | `上报[客厅] HTTP 201` | 按源名称/Token 上报成功 |
-| `Token 失效 source=...` | 仅清该源离线积压 |
+| `Token 失效 source=...` | 清该源积压并停用该源（需更新 Token 重编译） |
 | `部分采样` / `已入离线队列` | 与原版同义 |
 
 ## 限制

@@ -27,6 +27,19 @@ static esp_err_t bmp280_write_reg(bmp280_t *bmp, uint8_t reg, uint8_t val)
     return i2c_master_transmit(bmp->dev, buf, sizeof(buf), BMP280_I2C_TIMEOUT_MS);
 }
 
+/** 初始化失败时摘除已挂载设备，避免热修复重复 add_device */
+static void bmp280_detach(bmp280_t *bmp)
+{
+    if (bmp == NULL) {
+        return;
+    }
+    if (bmp->dev != NULL) {
+        i2c_master_bus_rm_device(bmp->dev);
+        bmp->dev = NULL;
+    }
+    bmp->present = false;
+}
+
 static void bmp280_parse_calib(bmp280_t *bmp, const uint8_t *d)
 {
     bmp->dig_T1 = (uint16_t)(((uint16_t)d[1] << 8) | d[0]);
@@ -63,6 +76,8 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
         return ESP_ERR_INVALID_ARG;
     }
 
+    /* 重复 init：先摘掉旧设备句柄，禁止在总线上堆叠同地址设备 */
+    bmp280_detach(bmp);
     memset(bmp, 0, sizeof(*bmp));
     bmp->present = false;
 
@@ -90,6 +105,7 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &bmp->dev);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "BMP280 添加设备失败: %s", esp_err_to_name(err));
+        bmp->dev = NULL;
         return err;
     }
     bmp->i2c_addr = chosen;
@@ -98,11 +114,13 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     err = bmp280_read_regs(bmp, BMP280_REG_CHIP_ID, &chip_id, 1);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "读取 WHOAMI 失败: %s", esp_err_to_name(err));
+        bmp280_detach(bmp);
         return err;
     }
     if (chip_id != BMP280_CHIP_ID) {
         ESP_LOGE(TAG, "WHOAMI 不匹配: 0x%02X (期望 0x%02X) @0x%02X",
                  chip_id, BMP280_CHIP_ID, chosen);
+        bmp280_detach(bmp);
         return ESP_ERR_INVALID_RESPONSE;
     }
 
@@ -110,6 +128,7 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     err = bmp280_read_regs(bmp, BMP280_REG_CALIB, calib, sizeof(calib));
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "读取校准参数失败: %s", esp_err_to_name(err));
+        bmp280_detach(bmp);
         return err;
     }
     bmp280_parse_calib(bmp, calib);
@@ -118,12 +137,14 @@ esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_s
     err = bmp280_write_reg(bmp, BMP280_REG_CTRL_MEAS, BMP280_CTRL_MEAS_SLEEP);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "写入 CTRL_MEAS(sleep) 失败: %s", esp_err_to_name(err));
+        bmp280_detach(bmp);
         return err;
     }
     vTaskDelay(pdMS_TO_TICKS(2));
     err = bmp280_write_reg(bmp, BMP280_REG_CONFIG, BMP280_CONFIG_FILTER4);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "写入 CONFIG 失败: %s", esp_err_to_name(err));
+        bmp280_detach(bmp);
         return err;
     }
 
