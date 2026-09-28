@@ -53,6 +53,7 @@ static const char *TAG = "atc_ble";
 #define BTHOME_OBJ_BATTERY     0x01
 #define BTHOME_OBJ_TEMPERATURE 0x02
 #define BTHOME_OBJ_HUMIDITY    0x03
+#define BTHOME_OBJ_HUMIDITY_U8 0x2E
 #define BTHOME_OBJ_VOLTAGE     0x0C
 
 static atc_ble_sample_t s_latest;
@@ -61,6 +62,10 @@ static uint8_t s_expect_mac[6];
 static uint8_t s_bindkey[16];
 static bool s_has_mac_filter;
 static bool s_has_bindkey;
+/* BTHome 加密帧 4 字节 counter 防重放：同一 MAC 仅接受严格递增的 counter */
+static uint8_t s_bthome_last_mac[6];
+static uint32_t s_bthome_last_counter;
+static bool s_bthome_counter_valid;
 /* 跨任务读写（GAP 回调 / scan_sup / thp_cycle 上报路径） */
 static volatile bool s_scanning;
 static volatile bool s_inited;
@@ -153,7 +158,6 @@ static bool ccm_decrypt_tag4(const uint8_t key[16],
     if (ct_tag_len < 4) {
         return false;
     }
-    size_t cipher_len = ct_tag_len - 4;
 
     psa_status_t st = psa_crypto_init();
     if (st != PSA_SUCCESS) {
@@ -189,7 +193,6 @@ static bool ccm_decrypt_tag4(const uint8_t key[16],
     if (plain_len != NULL) {
         *plain_len = out_len;
     }
-    (void)cipher_len;
     return true;
 }
 
@@ -342,6 +345,7 @@ static bool bthome_parse_objects(const uint8_t *objs, uint16_t objs_len,
         switch (id) {
         case BTHOME_OBJ_PACKET_ID:
         case BTHOME_OBJ_BATTERY:
+        case BTHOME_OBJ_HUMIDITY_U8:
             vsz = 1;
             break;
         case BTHOME_OBJ_TEMPERATURE:
@@ -373,6 +377,10 @@ static bool bthome_parse_objects(const uint8_t *objs, uint16_t objs_len,
             out->humidity = (uint16_t)(v[0] | (v[1] << 8)) / 100.0f;
             has_h = true;
             break;
+        case BTHOME_OBJ_HUMIDITY_U8:
+            out->humidity = (float)v[0];
+            has_h = true;
+            break;
         case BTHOME_OBJ_VOLTAGE:
             /* factor 0.001 V → 存 mV */
             out->battery_mv = (uint16_t)(v[0] | (v[1] << 8));
@@ -396,9 +404,6 @@ bool atc_ble_parse_bthome_clear(const uint8_t *after_uuid, uint16_t after_uuid_l
         return false;
     }
     if ((info & BTHOME_DEV_INFO_VER_MASK) != BTHOME_DEV_INFO_VER2) {
-        return false;
-    }
-    if (adv_mac != NULL && s_has_mac_filter && !mac_eq(adv_mac, s_expect_mac)) {
         return false;
     }
 
@@ -476,6 +481,25 @@ bool atc_ble_parse_bthome_encrypted(const uint8_t *ad, uint16_t ad_len,
     if (!bthome_parse_objects(plain, (uint16_t)plain_len, out)) {
         return false;
     }
+
+    /* 防重放：同一 MAC 仅接受严格递增的 counter（4 字节 LE） */
+    uint32_t ctr = (uint32_t)counter[0] | ((uint32_t)counter[1] << 8) |
+                   ((uint32_t)counter[2] << 16) | ((uint32_t)counter[3] << 24);
+    bool replay;
+    portENTER_CRITICAL(&s_lock);
+    replay = s_bthome_counter_valid && mac_eq(adv_mac, s_bthome_last_mac) &&
+             ctr <= s_bthome_last_counter;
+    if (!replay) {
+        memcpy(s_bthome_last_mac, adv_mac, 6);
+        s_bthome_last_counter = ctr;
+        s_bthome_counter_valid = true;
+    }
+    portEXIT_CRITICAL(&s_lock);
+    if (replay) {
+        ESP_LOGD(TAG, "BTHome 加密帧 counter=%lu 未递增，丢弃（防重放）",
+                 (unsigned long)ctr);
+        return false;
+    }
     return true;
 }
 
@@ -493,8 +517,9 @@ static void handle_adv_raw(const uint8_t addr_msb[6], int8_t rssi,
     size_t off = 0;
     while (off + 1 < len) {
         uint8_t ad_len = data[off];
-        if (ad_len == 0 || off + ad_len >= len + 0) {
-            /* ad_len 不含自身；合法时 off+1+ad_len <= len */
+        if (ad_len == 0) {
+            /* 零长度 AD 元素非法，避免 plen 下溢导致越界读 */
+            break;
         }
         if (off + 1 + ad_len > len) {
             break;
@@ -721,6 +746,9 @@ esp_err_t atc_ble_init(const uint8_t expect_mac[6], const uint8_t bindkey[16])
     s_latest.battery_pct = 0xFF;
     s_has_mac_filter = false;
     s_has_bindkey = false;
+    s_bthome_counter_valid = false;
+    memset(s_bthome_last_mac, 0, sizeof(s_bthome_last_mac));
+    s_bthome_last_counter = 0;
     if (expect_mac != NULL) {
         uint8_t z[6] = {0};
         if (!mac_eq(expect_mac, z)) {
