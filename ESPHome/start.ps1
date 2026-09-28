@@ -1,0 +1,1 @@
+esphome-env\Scripts\activate
