@@ -1,10 +1,6 @@
-/*
- * Wi-Fi STA：连接、状态查询、RSSI
- */
 #pragma once
 
 #include <stdbool.h>
-#include <stdint.h>
 
 #include "esp_err.h"
 

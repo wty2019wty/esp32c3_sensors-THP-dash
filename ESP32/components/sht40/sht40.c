@@ -32,7 +32,11 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_spe
         return ESP_ERR_INVALID_ARG;
     }
 
-    sht->dev = NULL;
+    /* 重复 init：先摘旧句柄，避免同地址设备堆叠 */
+    if (sht->dev != NULL) {
+        i2c_master_bus_rm_device(sht->dev);
+        sht->dev = NULL;
+    }
     sht->present = false;
 
     static const uint8_t addrs[] = { SHT40_I2C_ADDR, SHT40_I2C_ADDR_ALT };
@@ -49,16 +53,20 @@ esp_err_t sht40_init(sht40_t *sht, i2c_master_bus_handle_t bus, uint32_t scl_spe
         esp_err_t err = i2c_master_bus_add_device(bus, &dev_cfg, &sht->dev);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "SHT40 添加设备失败: %s", esp_err_to_name(err));
+            sht->dev = NULL;
             return err;
         }
 
         uint8_t rst = SHT40_CMD_SOFT_RESET;
         err = i2c_master_transmit(sht->dev, &rst, 1, SHT40_I2C_TIMEOUT_MS);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "SHT40 软复位失败: %s", esp_err_to_name(err));
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(SHT40_RESET_DELAY_MS));
+            ESP_LOGW(TAG, "SHT40 软复位失败: %s，摘除句柄以便热修复重试", esp_err_to_name(err));
+            i2c_master_bus_rm_device(sht->dev);
+            sht->dev = NULL;
+            sht->present = false;
+            return err;
         }
+        vTaskDelay(pdMS_TO_TICKS(SHT40_RESET_DELAY_MS));
 
         sht->present = true;
         ESP_LOGI(TAG, "SHT40 初始化成功 (0x%02X)", addrs[i]);

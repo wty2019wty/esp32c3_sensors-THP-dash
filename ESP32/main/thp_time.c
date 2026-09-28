@@ -3,12 +3,11 @@
 #include <string.h>
 #include <sys/time.h>
 
-#include "esp_err.h"
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "freertos/task.h"
 
 #include "thp_config.h"
 #include "thp_wifi.h"
@@ -27,15 +26,10 @@ static const char *TAG = "thp.time";
 #define THP_NTP_RESYNC_EVERY_CYCLES 12
 #endif
 #ifndef THP_NTP_SERVER_LIST
-#ifdef THP_NTP_SERVER
-#define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST(THP_NTP_SERVER)
-#else
 #define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST("pool.ntp.org")
-#endif
 #endif
 
 static EventGroupHandle_t s_time_events;
-/** 已同步后跳过的周期数；达到 THP_NTP_RESYNC_EVERY_CYCLES 则重同步 */
 static unsigned s_sync_skip_count;
 
 static void time_events_ensure(void)
@@ -67,12 +61,10 @@ void thp_time_sntp_start(void)
     cfg.smooth_sync = false;
 
     if (cfg.num_of_servers > CONFIG_LWIP_SNTP_MAX_SERVERS) {
-        ESP_LOGW(TAG, "NTP 服务器数 %u 超过 CONFIG_LWIP_SNTP_MAX_SERVERS=%d，将截断",
-                 (unsigned)cfg.num_of_servers, CONFIG_LWIP_SNTP_MAX_SERVERS);
         cfg.num_of_servers = CONFIG_LWIP_SNTP_MAX_SERVERS;
     }
 
-    ESP_LOGI(TAG, "NTP 服务器 %u 个：", (unsigned)cfg.num_of_servers);
+    ESP_LOGI(TAG, "NTP 服务器 %u 个", (unsigned)cfg.num_of_servers);
     for (size_t i = 0; i < cfg.num_of_servers && i < CONFIG_LWIP_SNTP_MAX_SERVERS; i++) {
         ESP_LOGI(TAG, "  [%u] %s", (unsigned)i, cfg.servers[i] ? cfg.servers[i] : "(null)");
     }
@@ -86,14 +78,12 @@ void thp_time_sntp_start(void)
     err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(THP_NTP_SYNC_TIMEOUT_MS));
     if (err == ESP_OK) {
         ESP_LOGI(TAG, "启动时 SNTP 时间已同步");
-        time_events_ensure();
         if (s_time_events) {
             xEventGroupSetBits(s_time_events, SNTP_SYNC_BIT);
         }
         s_sync_skip_count = 0;
     } else {
-        ESP_LOGW(TAG, "启动时 SNTP 同步失败/超时(%s)，将由每周期上报前再同步",
-                 esp_err_to_name(err));
+        ESP_LOGW(TAG, "启动时 SNTP 同步失败/超时(%s)", esp_err_to_name(err));
     }
 }
 
@@ -151,10 +141,7 @@ bool thp_time_format_iso(char *out)
     struct timeval tv = {0};
     time(&now);
     gettimeofday(&tv, NULL);
-    if (now < 1600000000) {
-        return false;
-    }
-    if (!thp_time_is_synced()) {
+    if (now < 1600000000 || !thp_time_is_synced()) {
         return false;
     }
     if (!thp_time_format_iso_at(now, out)) {
@@ -182,7 +169,6 @@ bool thp_time_sync_before_report(void)
         return thp_time_is_synced();
     }
 
-    /* 一期策略：已同步则短路，每 N 周期才真正重同步（漂移阈值二期） */
     if (thp_time_is_synced() &&
         s_sync_skip_count + 1 < (unsigned)THP_NTP_RESYNC_EVERY_CYCLES) {
         s_sync_skip_count++;
@@ -196,7 +182,6 @@ bool thp_time_sync_before_report(void)
 
     err = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(THP_NTP_SYNC_TIMEOUT_MS));
     if (err == ESP_OK) {
-        /* 仅在真正同步成功时置位；ESP_ERR_NOT_FINISHED 表示仍在进行中 */
         if (s_time_events) {
             xEventGroupSetBits(s_time_events, SNTP_SYNC_BIT);
         }
@@ -204,8 +189,6 @@ bool thp_time_sync_before_report(void)
         char iso[ISO_UTC_BUF_LEN];
         if (thp_time_format_iso(iso)) {
             ESP_LOGI(TAG, "上报前 NTP 同步 OK  UTC=%s", iso);
-        } else {
-            ESP_LOGI(TAG, "上报前 NTP 同步 OK");
         }
         return true;
     }
@@ -215,29 +198,22 @@ bool thp_time_sync_before_report(void)
     const bool had_sync = thp_time_is_synced();
 
     if (err == ESP_ERR_NOT_FINISHED) {
-        /* 同步进行中：不得把 SYNC_BIT 当成功；已有可信时间则沿用 */
         if (had_sync && now > 1600000000) {
-            /* 本周期已真正 sync_wait 过；复位 skip，避免下一周期立刻再打 20s */
             s_sync_skip_count = 0;
             ESP_LOGW(TAG, "上报前 NTP 仍在同步中，沿用已有系统时间");
             return true;
         }
-        ESP_LOGW(TAG, "上报前 NTP 仍在同步中且尚无可信时间，本条可能不带 measured_at");
+        ESP_LOGW(TAG, "上报前 NTP 同步中且尚无可信时间");
         return false;
     }
 
     if (had_sync && now > 1600000000) {
-        char iso[ISO_UTC_BUF_LEN];
-        thp_time_format_iso(iso);
-        /* 失败也复位 skip：等价于「失败一次，再隔 RESYNC 周期才重试」 */
         s_sync_skip_count = 0;
-        ESP_LOGW(TAG, "上报前 NTP 超时(%s)，沿用已有系统时间 UTC=%s",
-                 esp_err_to_name(err), iso[0] ? iso : "(n/a)");
+        ESP_LOGW(TAG, "上报前 NTP 超时(%s)，沿用已有系统时间", esp_err_to_name(err));
         return true;
     }
 
-    ESP_LOGW(TAG, "上报前 NTP 同步失败(%s)，本条可能不带 measured_at",
-             esp_err_to_name(err));
+    ESP_LOGW(TAG, "上报前 NTP 同步失败(%s)", esp_err_to_name(err));
     return false;
 }
 
@@ -251,7 +227,46 @@ void thp_time_stamp_reading(thp_reading_t *r)
     if (thp_wifi_get_rssi(&rssi)) {
         r->rssi = rssi;
     }
-    if (thp_time_is_synced()) {
-        r->has_iso = thp_time_format_iso(r->iso);
+}
+
+bool thp_time_fill_sample_iso(thp_reading_t *r, int64_t sample_mono_ms)
+{
+    if (r == NULL) {
+        return false;
     }
+    r->has_iso = false;
+    r->iso[0] = '\0';
+    if (!thp_time_is_synced()) {
+        return false;
+    }
+
+    time_t now_wall = 0;
+    time(&now_wall);
+    if (now_wall < 1600000000) {
+        return false;
+    }
+
+    int64_t now_mono = esp_timer_get_time() / 1000;
+    int64_t skew_ms = now_mono - sample_mono_ms;
+    /* 异常回拨/超长漂移：退回“现在”，避免写出离谱时间戳 */
+    if (skew_ms < 0 || skew_ms > (int64_t)3 * 60 * 60 * 1000) {
+        skew_ms = 0;
+        sample_mono_ms = now_mono;
+    }
+
+    time_t sample_wall = now_wall - (time_t)(skew_ms / 1000);
+    if (!thp_time_format_iso_at(sample_wall, r->iso)) {
+        return false;
+    }
+
+    int ms = (int)(sample_mono_ms % 1000);
+    if (ms < 0) {
+        ms = 0;
+    }
+    size_t len = strlen(r->iso);
+    if (len >= 5) {
+        snprintf(r->iso + len - 5, 6, ".%03dZ", ms);
+    }
+    r->has_iso = r->iso[0] != '\0';
+    return r->has_iso;
 }

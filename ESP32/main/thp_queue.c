@@ -1,17 +1,17 @@
 #include "thp_queue.h"
 
-#include "esp_err.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
 #include "thp_config.h"
+#include "thp_sources.h"
 #include "thp_types.h"
 
 static const char *TAG = "thp.queue";
 
 #ifndef THP_OFFLINE_QUEUE_LEN
-#define THP_OFFLINE_QUEUE_LEN 288
+#define THP_OFFLINE_QUEUE_LEN 256
 #endif
 
 static thp_reading_t s_offline_q[THP_OFFLINE_QUEUE_LEN];
@@ -58,8 +58,8 @@ void thp_queue_push(const thp_reading_t *r)
     s_offline_count++;
     unsigned n = (unsigned)s_offline_count;
     q_unlock();
-    ESP_LOGW(TAG, "已入离线队列 kind=%s (%u/%u) iso=%s%s%s",
-             thp_kind_tag(r->kind), n, (unsigned)THP_OFFLINE_QUEUE_LEN,
+    ESP_LOGW(TAG, "已入离线队列 src=%s (%u/%u) iso=%s%s%s",
+             thp_source_name(r->source_id), n, (unsigned)THP_OFFLINE_QUEUE_LEN,
              r->has_iso ? r->iso : "(no-ts)",
              r->has_th ? " TH" : "",
              r->has_p ? " P" : "");
@@ -96,6 +96,32 @@ void thp_queue_clear(void)
     s_offline_head = 0;
     s_offline_count = 0;
     q_unlock();
+}
+
+void thp_queue_clear_source(uint8_t source_id)
+{
+    q_lock();
+    size_t w = 0;
+    size_t n = s_offline_count;
+    for (size_t i = 0; i < n; i++) {
+        size_t idx = (s_offline_head + i) % THP_OFFLINE_QUEUE_LEN;
+        if (s_offline_q[idx].source_id == source_id) {
+            continue;
+        }
+        size_t widx = (s_offline_head + w) % THP_OFFLINE_QUEUE_LEN;
+        s_offline_q[widx] = s_offline_q[idx];
+        w++;
+    }
+    unsigned dropped = (unsigned)(n - w);
+    s_offline_count = w;
+    if (w == 0) {
+        s_offline_head = 0;
+    }
+    q_unlock();
+    if (dropped > 0) {
+        ESP_LOGW(TAG, "已清除 src=%s 的离线积压 %u 条",
+                 thp_source_name(source_id), dropped);
+    }
 }
 
 unsigned thp_queue_count(void)
