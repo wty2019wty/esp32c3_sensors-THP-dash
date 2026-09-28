@@ -134,8 +134,8 @@ copy main\thp_config.h.example main\thp_config.h
 
 | 模式 | 值 | 何时用 |
 | --- | --- | --- |
-| BUNDLE | 0 | 默认。系统证书包，覆盖公有 CA |
-| PINNED | 1 | bundle 报 `No matching trusted root`（GTS 链，idf#18674）；信任 `thp_tls_trust.h` 内嵌根 |
+| BUNDLE | 0 | 系统证书包，覆盖公有 CA |
+| PINNED | 1 | **当前推荐**（TrustAsia→DigiCert G2）。bundle 报 `No matching trusted root` 或握手 `-0x7200` 时用；信任 `thp_tls_trust.h` 内嵌根 |
 | NONE | 2 | **仅调试**。需 sdkconfig 开 `CONFIG_ESP_TLS_INSECURE` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY` |
 
 兼容旧宏 `THP_HTTP_SKIP_VERIFY=1` ≡ `TRUST_NONE`。换域名/换 CA 时更新 `thp_tls_trust.h` 内嵌 PEM。
@@ -143,7 +143,7 @@ copy main\thp_config.h.example main\thp_config.h
 
 ## 调度（窗内零 HTTP/NTP）
 
-单 FreeRTOS 任务 `thp_cycle`（栈 8KB）。BLE 窗：T 前 `THP_BLE_SCAN_OPEN_BEFORE_MS`（默认 5s）开扫，T+`THP_BLE_SCAN_CLOSE_AFTER_MS`（默认 10s）关窗。
+单 FreeRTOS 任务 `thp_cycle`（栈 16KB，TLS 握手需要）。BLE 窗：T 前 `THP_BLE_SCAN_OPEN_BEFORE_MS`（默认 5s）开扫，T+`THP_BLE_SCAN_CLOSE_AFTER_MS`（默认 10s）关窗。
 
 ```
 T−5s          T              T+10s         之后
@@ -258,8 +258,9 @@ Content-Type: application/json
 | 1 | `THP_API_BASE` 须为 `https://域名`（不要 `127.0.0.1`） |
 | 2 | 默认 `CONFIG_LWIP_IPV6=n`：规避 Cloudflare AAAA 在 IPv6 不通时连挂 |
 | 3 | 预检 `DNS -> IPv4` + `TCP connect OK` 仍失败 → TLS/证书；DNS/TCP 失败 → 路由/运营商 |
-| 4 | `No matching trusted root certificate found` + `-0x3000` → `THP_TLS_TRUST` 改 `1`（PINNED） |
-| 5 | `THP_HTTP_TIMEOUT_MS` 可调到 30000~60000（CMCC + Cloudflare 偶尔极慢） |
+| 4 | `No matching trusted root` / `-0x3000` / 握手 `-0x7200` → `THP_TLS_TRUST=1`（PINNED，内嵌 DigiCert Global Root G2；TrustAsia 中间 CA 由服务器下发） |
+| 5 | 握手 `-0x7200`：证书链须能装进 `CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN`（当前 8192；TrustAsia 链 DER ~4.1KB，4096 不够） |
+| 5b | `THP_HTTP_TIMEOUT_MS` 可调到 30000~60000（CMCC + Cloudflare 偶尔极慢） |
 | 6 | `heap_free` < 70KB：TLS 可能起不来；确认未再链 OLED/IMU 等大组件 |
 | 7 | 仍不行：临时改 `http://<电脑局域网IP>:8787` 验证上报链路 |
 | 8 | 极端：路由器/运营商对 Cloudflare 不友好，改 `*.workers.dev` 或换网络 |

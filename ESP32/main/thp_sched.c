@@ -208,7 +208,8 @@ static void thp_sched_task(void *arg)
 
 void thp_sched_start_task(void)
 {
-    BaseType_t ok = xTaskCreate(thp_sched_task, "thp_cycle", 8192, NULL, 5, NULL);
+    /* TLS 握手 + 证书链校验栈耗较高，8KB 易溢出导致 mbedtls -0x7200 */
+    BaseType_t ok = xTaskCreate(thp_sched_task, "thp_cycle", 16384, NULL, 5, NULL);
     if (ok != pdPASS) {
         ESP_LOGE(TAG, "创建调度任务失败");
     }

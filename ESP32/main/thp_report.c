@@ -14,6 +14,7 @@
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
 #include "lwip/ip_addr.h"
 
 #include "thp_config.h"
@@ -409,9 +410,11 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
         xSemaphoreGive(s_net_mtx);
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x) heap=%u body=%s",
+        /* -0x7200：mbedtls CONN_EOF/INVALID_RECORD，多为握手被掐或栈不足，不是 HTTP 层错误 */
+        ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x) heap=%u stack_hwm=%u body=%s",
                  esp_err_to_name(err), (unsigned)err,
-                 (unsigned)esp_get_free_heap_size(), body);
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)uxTaskGetStackHighWaterMark(NULL), body);
         maybe_probe_api(deadline, backfill);
         esp_http_client_cleanup(client);
         *out_status = -1;
