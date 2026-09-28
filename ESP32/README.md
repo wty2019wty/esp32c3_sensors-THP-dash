@@ -50,7 +50,7 @@ ESP32/
 └── components/
     ├── sht40/                  # 温湿度驱动（CRC-8）
     ├── bmp280/                 # 气压驱动（0x76/0x77，t_fine 补偿）
-    └── atc_ble/                # pvvx ATC BLE 扫描解析
+    └── atc_ble/                # pvvx ATC / BTHome v2 BLE 扫描解析
 ```
 
 ### 调度模型

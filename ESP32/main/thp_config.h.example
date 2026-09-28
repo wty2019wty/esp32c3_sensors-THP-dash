@@ -116,6 +116,7 @@
 #define THP_MI_MAC           "A4:C1:38:E2:4E:43"
 
 /* pvvx 配置页「BindKey」（32 hex，16 字节）——加密 beacon 使用。
+ * PVVX (Custom) 加密与 BTHome v2 加密共用此 BindKey。
  * 注意：是 BindKey，不是 Mi Bind Key（v4.4+ 仅 EEP BindKey 生效）。
  * Encrypted beacon 关闭时可留全 0；开启后必须填写。
  */
