@@ -9,6 +9,10 @@
   <link rel="stylesheet" href="./css/app.css" />
 </head>
 <body>
+  <div id="demo-banner" class="demo-banner" hidden>
+    <span>演示模式 · 本地模拟数据，不连云端</span>
+    <button type="button" class="linkish" id="btn-exit-demo">退出演示</button>
+  </div>
   <div id="app">
     <!-- Bootstrap -->
     <section id="view-bootstrap" class="auth-view hidden" hidden>
@@ -99,7 +103,7 @@
           <div class="topbar-row">
             <div class="topbar-actions">
               <button type="button" class="btn" id="btn-export">导出 CSV</button>
-              <button type="button" class="btn ghost" id="btn-admin" hidden>管理</button>
+              <a class="btn ghost" id="btn-admin" href="./admin.html" hidden>管理</a>
               <button type="button" class="btn ghost" id="btn-logout">退出</button>
             </div>
           </div>
@@ -190,89 +194,11 @@
           <p class="chart-help" id="chart-help">滚轮/双指缩放时间轴；放大后拖动平移。点「重置缩放」恢复全程。</p>
         </section>
 
-        <section class="admin-panel hidden" id="admin-panel" hidden>
-          <header class="panel-head">
-            <h2>设备与 Token</h2>
-            <div class="admin-actions">
-              <button type="button" class="btn" id="btn-new-device">新建设备</button>
-              <button type="button" class="btn primary" id="btn-new-token">生成上报 Token</button>
-            </div>
-          </header>
-          <div class="admin-grid">
-            <div>
-              <h3>设备</h3>
-              <div class="table-wrap">
-                <table class="data-table" id="table-devices">
-                  <thead>
-                    <tr><th>ID</th><th>名称</th><th>状态</th><th>最近上报</th><th></th></tr>
-                  </thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </div>
-            <div>
-              <h3>上报 Token</h3>
-              <div class="table-wrap">
-                <table class="data-table" id="table-tokens">
-                  <thead>
-                    <tr><th>ID</th><th>设备</th><th>名称</th><th>状态</th><th>最近使用</th><th></th></tr>
-                  </thead>
-                  <tbody></tbody>
-                </table>
-              </div>
-            </div>
-          </div>
-        </section>
       </main>
 
       <div class="toast" id="toast" role="status" hidden></div>
     </section>
   </div>
-
-  <!-- Modal: create device -->
-  <dialog id="dlg-device" class="dlg">
-    <form method="dialog" id="form-device">
-      <h2>新建设备</h2>
-      <label class="field"><span>设备 ID</span><input name="id" placeholder="dev_lab1" pattern="[A-Za-z0-9_-]{2,64}" /></label>
-      <label class="field"><span>名称</span><input name="name" required maxlength="64" placeholder="实验室一号" /></label>
-      <p class="form-error" id="device-error" hidden></p>
-      <div class="dlg-actions">
-        <button type="button" class="btn ghost" data-close>取消</button>
-        <button type="submit" class="btn primary">创建</button>
-      </div>
-    </form>
-  </dialog>
-
-  <!-- Modal: create token -->
-  <dialog id="dlg-token" class="dlg">
-    <form method="dialog" id="form-token">
-      <h2>生成上报 Token</h2>
-      <p class="hint">Token 仅用于设备 HTTPS 上报，明文只显示一次。</p>
-      <label class="field">
-        <span>设备</span>
-        <select name="deviceId" id="token-device" required></select>
-      </label>
-      <label class="field"><span>备注名称（可选）</span><input name="name" maxlength="64" placeholder="bench-01" /></label>
-      <p class="form-error" id="token-error" hidden></p>
-      <div class="dlg-actions">
-        <button type="button" class="btn ghost" data-close>取消</button>
-        <button type="submit" class="btn primary">生成</button>
-      </div>
-    </form>
-  </dialog>
-
-  <!-- Modal: token secret once -->
-  <dialog id="dlg-secret" class="dlg">
-    <div>
-      <h2>保存 Token</h2>
-      <p class="warn-box">关闭后将无法再次查看。请立即写入设备配置。</p>
-      <pre class="secret-box" id="secret-value"></pre>
-      <div class="dlg-actions">
-        <button type="button" class="btn" id="btn-copy-secret">复制</button>
-        <button type="button" class="btn primary" data-close>我已保存</button>
-      </div>
-    </div>
-  </dialog>
 
   <script type="module" src="./js/app.js"></script>
 </body>

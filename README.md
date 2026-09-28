@@ -32,7 +32,7 @@ Pages Dash（自建登录会话 Cookie）
 | `wrangler.jsonc` | Worker + D1 + 静态资源绑定（`database_id` 部署前需回填） |
 | `src/` | Worker 源码（鉴权、上报、查询、降采样、CSV） |
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
-| `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
+| `public/` | Dash（`index.html` 监控页 + `admin.html` 管理页 + `css` + `js`），含本地演示模式 |
 | `desktop-1280.png` | Dash 桌面端界面预览 |
 | `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
 | `tools/local_e2e.py` | 本地登录→建设备→Token→上报 冒烟 |
@@ -52,7 +52,7 @@ Pages Dash（自建登录会话 Cookie）
 - **Token**：Dash 内生成/吊销；明文仅一次；库中只存哈希；**已吊销可再删除记录**（`DELETE …?purge=1`）
 - **查询** `GET /api/v1/readings`：默认当天，自动降采样；`GET /api/v1/latest` 提供当前值 + 在线状态
 - **导出** `GET /api/v1/export`：CSV 列 `timestamp,temperature,humidity,pressure`（UTF-8 BOM）；范围与当前选择一致（单设备）；**先 COUNT，再自动粒度**；超限/SQL 失败时**自动降一档**，不会为导出把长范围原始点整表拉进 Worker；响应头 `x-thp-coarsened=1` 表示已降采样
-- **Dash**：综合三线一张 ↔ 分项三张；多设备；管理面板；**光标/点击查看曲线上任一时刻数据**
+- **Dash**：综合三线一张 ↔ 分项三张；多设备；**管理独立页 `admin.html`**（设备与 Token）；**光标/点击查看曲线上任一时刻数据**
 - **Dash 交互增强（超出需求基线，已实现）**：时间轴**滚轮/双指缩放**、放大后**拖动平移**、「重置缩放」、图表**全屏**；离线阈值 **10 分钟**（2×上报周期）
 
 ## 部署（Cloudflare）
@@ -294,7 +294,13 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 2. 在已部署/本地站点 URL 后加 `?demo=1`  
 
 登录页出现后点击 **演示模式**：使用 `public/js/demo.js` 的本地模拟数据（设备、约 24h 曲线、假 Token、CSV 下载）。  
+
 **不会**写入 D1，也不能验证真实鉴权/上报。
+
+- 顶部常驻黄条「演示模式 · 本地模拟数据」，可点 **退出演示**
+- 状态记在 `sessionStorage`，监控页 ↔ 管理页跳转不断演示
+- 退出演示 / 退出登录会**同时注销真实会话**，避免 Cookie 残留
+- 演示里删除设备会同步清掉本地模拟记录（与吊销 Token 行为一致）
 
 ### 常见问题
 

@@ -110,7 +110,11 @@ export async function handle(path, method, body) {
     return { ok: true };
   }
   if (method === 'DELETE' && /\/api\/v1\/devices\//.test(path)) {
-    return { ok: true };
+    const id = decodeURIComponent(path.split('?')[0].split('/').pop());
+    db.devices = db.devices.filter((d) => d.id !== id);
+    db.tokens = db.tokens.filter((t) => t.deviceId !== id);
+    localStorage.setItem(KEY, JSON.stringify(db));
+    return { ok: true, id };
   }
   if (path.startsWith('/api/v1/tokens') && method === 'GET') {
     return { ok: true, tokens: db.tokens };

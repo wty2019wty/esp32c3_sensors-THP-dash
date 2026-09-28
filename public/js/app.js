@@ -1,4 +1,4 @@
-import { api, setCsrf, syncCsrfFromCookie, exportCsv, isDemo, setDemo } from './api.js';
+import { api, setCsrf, syncCsrfFromCookie, exportCsv, isDemo, setDemo, restoreDemo } from './api.js';
 import {
   drawAll,
   bindChartCursor,
@@ -605,76 +605,12 @@ function fillDeviceSelect() {
     sel.appendChild(opt);
   }
   if (state.deviceId) sel.value = state.deviceId;
-  const tokSel = $('#token-device');
-  if (tokSel) {
-    tokSel.innerHTML = '';
-    for (const d of state.devices) {
-      const opt = document.createElement('option');
-      opt.value = d.id;
-      opt.textContent = d.name ? `${d.name} (${d.id})` : d.id;
-      tokSel.appendChild(opt);
-    }
-    if (state.deviceId) tokSel.value = state.deviceId;
-  }
 }
 
-function renderDeviceTable() {
-  const tbody = $('#table-devices tbody');
-  tbody.innerHTML = '';
-  for (const d of state.devices) {
-    const tr = document.createElement('tr');
-    const id = escapeHtml(d.id);
-    const name = escapeHtml(d.name || '');
-    const status = escapeHtml(d.status || '');
-    const seen = escapeHtml(fmtTime(d.lastSeenAt));
-    const badgeClass = d.status === 'active' ? 'ok' : 'mute';
-    tr.innerHTML = `
-      <td>${id}</td>
-      <td>${name}</td>
-      <td><span class="badge ${badgeClass}">${status}</span></td>
-      <td>${seen}</td>
-      <td><button type="button" class="btn danger" data-del-device="${id}">删除</button></td>
-    `;
-    tbody.appendChild(tr);
-  }
-}
-
-async function refreshTokens() {
-  const data = await api.tokens();
-  const tbody = $('#table-tokens tbody');
-  tbody.innerHTML = '';
-  for (const t of data.tokens || []) {
-    const tr = document.createElement('tr');
-    const badge = t.status === 'active' ? 'ok' : 'mute';
-    const id = escapeHtml(t.id);
-    const actions =
-      t.status === 'active'
-        ? `<button type="button" class="btn danger" data-revoke-token="${id}">吊销</button>`
-        : `<button type="button" class="btn danger" data-purge-token="${id}">删除</button>`;
-    tr.innerHTML = `
-      <td>${id}</td>
-      <td>${escapeHtml(t.deviceName || t.deviceId || '')}</td>
-      <td>${escapeHtml(t.name || '—')}</td>
-      <td><span class="badge ${badge}">${escapeHtml(t.status || '')}</span></td>
-      <td>${escapeHtml(fmtTime(t.lastUsedAt))}</td>
-      <td>${actions}</td>
-    `;
-    tbody.appendChild(tr);
-  }
-}
-
-async function refreshAdmin() {
+async function refreshDevices() {
   const data = await api.devices();
   state.devices = data.devices || [];
   fillDeviceSelect();
-  renderDeviceTable();
-  if (state.user?.role === 'admin') {
-    try {
-      await refreshTokens();
-    } catch {
-      /* token list optional for non-admin views */
-    }
-  }
 }
 
 async function refreshSeries() {
@@ -714,10 +650,8 @@ async function afterLogin(user, csrf) {
   syncCsrfFromCookie();
   $('#user-label').textContent = `${user.username} · ${user.role}`;
   $('#btn-admin').hidden = user.role !== 'admin';
-  $('#admin-panel').hidden = user.role !== 'admin';
-  $('#admin-panel').classList.toggle('hidden', user.role !== 'admin');
   show('app');
-  await refreshAdmin();
+  await refreshDevices();
   if (!state.deviceId && state.devices.length) state.deviceId = state.devices[0].id;
   fillDeviceSelect();
   await refreshSeries();
@@ -727,6 +661,8 @@ async function boot() {
   const params = new URLSearchParams(location.search);
   if (params.get('demo') === '1') {
     setDemo(true);
+  } else {
+    restoreDemo();
   }
 
   try {
@@ -772,6 +708,22 @@ async function enterDemo() {
   toast('已进入演示模式（本地模拟数据）');
 }
 
+/** Leave mock mode and clear any real session cookies. */
+async function exitDemo() {
+  const wasDemo = isDemo();
+  setDemo(false);
+  try {
+    await api.logout();
+  } catch {
+    /* ignore network errors */
+  }
+  state.user = null;
+  show('login');
+  const hint = $('#demo-hint');
+  if (hint) hint.hidden = false;
+  if (wasDemo) toast('已退出演示，真实会话已注销');
+}
+
 // ----- Events -----
 $('#form-bootstrap')?.addEventListener('submit', async (e) => {
   e.preventDefault();
@@ -810,14 +762,18 @@ $('#form-login')?.addEventListener('submit', async (e) => {
 });
 
 $('#btn-demo')?.addEventListener('click', () => enterDemo());
+$('#btn-exit-demo')?.addEventListener('click', () => exitDemo());
 
 $('#btn-logout')?.addEventListener('click', async () => {
+  if (isDemo()) {
+    await exitDemo();
+    return;
+  }
   try {
-    if (!isDemo()) await api.logout();
+    await api.logout();
   } catch {
     /* ignore */
   }
-  setDemo(false);
   state.user = null;
   show('login');
   $('#demo-hint').hidden = false;
@@ -914,120 +870,6 @@ $('#btn-export')?.addEventListener('click', async () => {
     }
   } catch (err) {
     toast(err.message || '导出失败', true);
-  }
-});
-
-$('#btn-admin')?.addEventListener('click', () => {
-  const panel = $('#admin-panel');
-  panel.hidden = false;
-  panel.classList.remove('hidden');
-  panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-});
-
-$('#btn-new-device')?.addEventListener('click', () => {
-  $('#device-error').hidden = true;
-  $('#dlg-device').showModal();
-});
-
-$('#form-device')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const errEl = $('#device-error');
-  errEl.hidden = true;
-  try {
-    await api.createDevice({
-      id: String(fd.get('id') || '').trim() || undefined,
-      name: String(fd.get('name') || '').trim(),
-    });
-    $('#dlg-device').close();
-    e.target.reset();
-    await refreshAdmin();
-    toast('设备已创建');
-  } catch (err) {
-    errEl.hidden = false;
-    errEl.textContent = err.message || '创建失败';
-  }
-});
-
-$('#btn-new-token')?.addEventListener('click', () => {
-  fillDeviceSelect();
-  $('#token-error').hidden = true;
-  $('#dlg-token').showModal();
-});
-
-$('#form-token')?.addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const errEl = $('#token-error');
-  errEl.hidden = true;
-  try {
-    const res = await api.createToken({
-      deviceId: String(fd.get('deviceId')),
-      name: String(fd.get('name') || '').trim(),
-    });
-    $('#dlg-token').close();
-    e.target.reset();
-    $('#secret-value').textContent = res.secret || '';
-    $('#dlg-secret').showModal();
-    await refreshAdmin();
-  } catch (err) {
-    errEl.hidden = false;
-    errEl.textContent = err.message || '生成失败';
-  }
-});
-
-$('#btn-copy-secret')?.addEventListener('click', async () => {
-  const text = $('#secret-value').textContent;
-  try {
-    await navigator.clipboard.writeText(text);
-    toast('已复制');
-  } catch {
-    toast('复制失败，请手动选中', true);
-  }
-});
-
-$$('[data-close]').forEach((btn) => {
-  btn.addEventListener('click', () => btn.closest('dialog')?.close());
-});
-
-$('#table-devices')?.addEventListener('click', async (e) => {
-  const id = e.target?.dataset?.delDevice;
-  if (!id) return;
-  if (!confirm(`删除设备 ${id}？其 Token 与读数将一并删除。`)) return;
-  try {
-    await api.deleteDevice(id);
-    if (state.deviceId === id) state.deviceId = state.devices.find((d) => d.id !== id)?.id || null;
-    await refreshAdmin();
-    await refreshSeries().catch(() => {});
-    toast('设备已删除');
-  } catch (err) {
-    toast(err.message, true);
-  }
-});
-
-$('#table-tokens')?.addEventListener('click', async (e) => {
-  const revokeId = e.target?.dataset?.revokeToken;
-  const purgeId = e.target?.dataset?.purgeToken;
-  if (revokeId) {
-    if (!confirm('吊销该 Token？关联设备将无法继续上报（记录仍保留，可再删除）。')) return;
-    try {
-      await api.revokeToken(revokeId);
-      await refreshTokens();
-      toast('Token 已吊销');
-    } catch (err) {
-      toast(err.message, true);
-    }
-    return;
-  }
-  if (purgeId) {
-    if (!confirm('从数据库删除该已吊销 Token 记录？此操作不可恢复。')) return;
-    try {
-      await api.purgeToken(purgeId);
-      await refreshTokens();
-      toast('Token 记录已删除');
-    } catch (err) {
-      toast(err.message, true);
-    }
   }
 });
 
