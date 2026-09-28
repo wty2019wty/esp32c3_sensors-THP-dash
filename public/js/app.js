@@ -153,11 +153,14 @@ function updateZoomUI() {
   const btn = $('#btn-reset-zoom');
   const zoomed = chartIsZoomed();
   if (chip) {
-    chip.hidden = !zoomed;
+    // 仅切换可见性，占位固定，避免标题行跳动
+    chip.classList.toggle('is-on', zoomed);
+    chip.setAttribute('aria-hidden', zoomed ? 'false' : 'true');
     if (zoomed) chip.textContent = '已放大';
   }
   if (btn) {
-    btn.hidden = !zoomed;
+    btn.classList.toggle('is-on', zoomed);
+    btn.disabled = !zoomed;
   }
 }
 
@@ -587,12 +590,19 @@ function updateChartSub() {
   const gran = g ? (g.id === 'raw' ? '原始 5 分钟' : g.label || g.id) : '自动粒度';
   let text = `${rangeLabel()} · ${gran} · ${state.points.length} 点`;
   const win = currentXWindow();
+  const sub = $('#chart-sub');
+  const chip = $('#chart-zoom-chip');
   if (win && chartIsZoomed()) {
     const from = new Date(win.min).toLocaleString();
     const to = new Date(win.max).toLocaleString();
-    text += ` · 放大 ${from} → ${to}`;
+    // 完整起止只放 title，可见文案保持短，避免撑高/换行造成跳动
+    text += ' · 已放大';
+    if (sub) sub.title = `放大 ${from} → ${to}`;
+    if (chip) chip.title = `放大 ${from} → ${to}`;
+  } else {
+    if (sub) sub.title = '';
   }
-  $('#chart-sub').textContent = text;
+  if (sub) sub.textContent = text;
 }
 
 function fillDeviceSelect() {
@@ -849,12 +859,47 @@ $$('.legend-item').forEach((btn) => {
   });
 });
 
+$$('#dlg-export [data-close]').forEach((btn) => {
+  btn.addEventListener('click', () => btn.closest('dialog')?.close());
+});
+
+function deviceLabel(id) {
+  const d = state.devices.find((x) => x.id === id);
+  return d ? (d.name ? `${d.name} (${d.id})` : d.id) : id || '—';
+}
+
+function confirmExportDialog({ deviceId, from, to }) {
+  const dlg = $('#dlg-export');
+  if (!dlg) return Promise.resolve(true);
+  $('#export-device').textContent = deviceLabel(deviceId);
+  $('#export-range').textContent = rangeLabel();
+  $('#export-fromto').textContent = `${fmtTime(from)} → ${fmtTime(to)}`;
+  dlg.returnValue = '';
+  return new Promise((resolve) => {
+    const onClose = () => {
+      dlg.removeEventListener('close', onClose);
+      resolve(dlg.returnValue === 'confirm');
+    };
+    dlg.addEventListener('close', onClose);
+    const confirmBtn = $('#form-export button[value="confirm"]');
+    const onConfirmClick = () => {
+      dlg.returnValue = 'confirm';
+      confirmBtn?.removeEventListener('click', onConfirmClick);
+    };
+    confirmBtn?.addEventListener('click', onConfirmClick);
+    if (typeof dlg.showModal === 'function') dlg.showModal();
+    else resolve(true);
+  });
+}
+
 $('#btn-export')?.addEventListener('click', async () => {
   if (!state.deviceId) {
     toast('请先选择设备', true);
     return;
   }
   const { from, to } = rangeToFromTo();
+  const ok = await confirmExportDialog({ deviceId: state.deviceId, from, to });
+  if (!ok) return;
   try {
     const result = await exportCsv({ device_id: state.deviceId, from, to });
     if (result && typeof result === 'object') {

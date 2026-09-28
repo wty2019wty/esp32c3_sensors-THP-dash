@@ -391,10 +391,12 @@ a.btn {
   padding-bottom: max(20px, env(safe-area-inset-bottom));
   display: grid;
   gap: 16px;
-  max-width: 1200px;
+  /* PC：铺满可用宽度，充分利用屏幕空间 */
+  max-width: none;
   width: 100%;
   margin: 0 auto;
   min-width: 0;
+  flex: 1 1 auto;
 }
 
 /* Grid children default min-width:auto — tables/canvas can force page overflow */
@@ -650,6 +652,11 @@ body.chart-fs-open .admin-panel {
   margin: 4px 0 0;
   color: var(--muted);
   font-size: 0.85rem;
+  /* 单行固定高度：放大后加长文案也不换行顶起布局 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-height: 1.5em;
 }
 
 .legend {
@@ -690,6 +697,34 @@ body.chart-fs-open .admin-panel {
   font-weight: 600;
   vertical-align: middle;
   letter-spacing: 0.02em;
+  /* 占位常驻，避免「已放大」出现时标题行跳动 */
+  visibility: hidden;
+  opacity: 0;
+}
+
+.zoom-chip.is-on {
+  visibility: visible;
+  opacity: 1;
+}
+
+/* 重置缩放：预留按钮位，显隐不挤动右侧控件 */
+#btn-reset-zoom {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#btn-reset-zoom.is-on,
+#btn-reset-zoom.is-on:enabled {
+  visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+
+#btn-reset-zoom:disabled {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .legend-item {
@@ -748,7 +783,35 @@ body.chart-fs-open .admin-panel {
 
 .chart-split canvas {
   height: 180px;
-  max-height: 220px;
+  max-height: 280px;
+}
+
+/* PC 大屏：图表吃满可用高度 */
+@media (min-width: 961px) {
+  .main {
+    padding: 22px 28px 28px;
+    padding-left: max(28px, env(safe-area-inset-left));
+    padding-right: max(28px, env(safe-area-inset-right));
+    gap: 18px;
+  }
+
+  .topbar {
+    padding-left: max(28px, env(safe-area-inset-left));
+    padding-right: max(28px, env(safe-area-inset-right));
+  }
+
+  .chart-host canvas {
+    height: 520px;
+  }
+
+  .chart-split canvas {
+    height: 220px;
+    max-height: 320px;
+  }
+
+  .stat-value {
+    font-size: 2.25rem;
+  }
 }
 
 .chart-split {
@@ -1017,6 +1080,36 @@ body.chart-fs-open .admin-panel {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 8px;
+}
+
+.export-summary {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 14px;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+
+.export-summary .es-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.9rem;
+  min-width: 0;
+}
+
+.export-summary .es-row span {
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.export-summary .es-row strong {
+  text-align: right;
+  word-break: break-all;
+  min-width: 0;
+  font-weight: 600;
 }
 
 .secret-box {

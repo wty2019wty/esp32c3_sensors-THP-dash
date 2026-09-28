@@ -6,6 +6,7 @@
   <meta name="color-scheme" content="dark" />
   <meta name="theme-color" content="#0b1220" />
   <title>THP Dash · 温湿度气压监控</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
   <link rel="stylesheet" href="./css/app.css" />
 </head>
 <body>
@@ -137,7 +138,7 @@
         <section class="chart-panel">
           <header class="panel-head">
             <div>
-              <h2 id="chart-title">温湿度气压 <span id="chart-zoom-chip" class="zoom-chip" hidden>已放大</span></h2>
+              <h2 id="chart-title">温湿度气压 <span id="chart-zoom-chip" class="zoom-chip" aria-hidden="true">已放大</span></h2>
               <p class="panel-sub" id="chart-sub">默认当天 · 自动粒度</p>
             </div>
             <div class="panel-head-right">
@@ -146,7 +147,7 @@
                 <button type="button" class="seg" data-view="split" data-chart-view>分项</button>
               </div>
               <button type="button" class="btn" id="btn-fs-chart" title="全屏查看温湿度气压图表">全屏</button>
-              <button type="button" class="btn ghost" id="btn-reset-zoom" hidden title="恢复完整时间范围">重置缩放</button>
+              <button type="button" class="btn ghost" id="btn-reset-zoom" title="恢复完整时间范围">重置缩放</button>
               <div class="legend" id="legend">
                 <button type="button" class="legend-item active" data-series="temperature">
                   <i style="background:var(--temp)"></i>温度
@@ -199,6 +200,24 @@
       <div class="toast" id="toast" role="status" hidden></div>
     </section>
   </div>
+
+  <!-- Modal: CSV export confirm -->
+  <dialog id="dlg-export" class="dlg" aria-labelledby="export-title">
+    <form method="dialog" id="form-export">
+      <h2 id="export-title">导出 CSV</h2>
+      <p class="hint">将按当前设备与时间范围导出温湿度气压数据，请确认后继续。</p>
+      <div class="export-summary">
+        <div class="es-row"><span>设备</span><strong id="export-device">—</strong></div>
+        <div class="es-row"><span>范围</span><strong id="export-range">—</strong></div>
+        <div class="es-row"><span>起止</span><strong id="export-fromto">—</strong></div>
+      </div>
+      <p class="hint small">长范围或数据量大时会自动降采样，仍导出 CSV 文件。</p>
+      <div class="dlg-actions">
+        <button type="button" class="btn ghost" data-close>取消</button>
+        <button type="submit" class="btn primary" value="confirm">确认导出</button>
+      </div>
+    </form>
+  </dialog>
 
   <script type="module" src="./js/app.js"></script>
 </body>
