@@ -1,8 +1,10 @@
 # 不好用！！！
 
+> **存档 / 实验**：本目录 ESPHome 方案不推荐生产使用。正式多设备固件见 [`../ESP32/`](../ESP32/)（README · DESIGN）。
+
 # ESPHome 环境与 THP 上报配置
 
-本目录用 **ESPHome** 读取 SHT40 / BMP280 与小米计 BLE（MI），按与 `ESP32/` 固件相同的协议上报到 Cloudflare Worker（`POST /api/v1/readings`）。
+本目录用 **ESPHome** 读取 SHT40 / BMP280 与小米计 BLE（BTHome），按与 `ESP32/` 固件相同的协议上报到 Cloudflare Worker（`POST /api/v1/readings`）。
 
 ## 1. 环境
 
@@ -52,7 +54,7 @@ copy secrets.yaml.example secrets.yaml
 # 填 Wi-Fi / API Token / 小米计 MAC 与 bindkey
 ```
 
-Token 在 Dash「管理 → 生成上报 Token」：**LOCAL** 与 **MI 各一枚**。`Authorization` 写成 `Bearer thp_xxx`。
+Token 在 Dash「管理 → 生成上报 Token」：**LOCAL** 与 **BLE 各一枚**。`Authorization` 写成 `Bearer thp_xxx`。
 
 ## 3. 常用命令
 
@@ -78,7 +80,7 @@ esphome clean sensor.yaml
 | 通道 | 传感器 | Token | 字段 |
 | --- | --- | --- | --- |
 | LOCAL | SHT40 温湿度 + BMP280 气压 | `thp_local_auth` | `temperature`+`humidity` 同报；`pressure` 可选；`device_id`/`measured_at`/`rssi` |
-| MI | 小米计 BLE 温湿度 | `thp_mi_auth` | `temperature`+`humidity` |
+| BLE | 小米计 BLE 温湿度 | `thp_mi_auth` | `temperature`+`humidity` |
 
 - 周期默认 **5 分钟**（`substitutions.report_interval`）
 - 部分上报：缺气压只报 T+H；T+H 无效则跳过

@@ -9,21 +9,26 @@
 
 #include "atc_ble.h"
 #include "esp_crt_bundle.h"
-#include "esp_err.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
-#include "freertos/task.h"
 #include "lwip/ip_addr.h"
 
 #include "thp_config.h"
 #include "thp_queue.h"
+#include "thp_sources.h"
 #include "thp_time.h"
 #include "thp_tls_trust.h"
 #include "thp_types.h"
 #include "thp_wifi.h"
+
+/* 兼容旧宏：THP_HTTP_SKIP_VERIFY=1 等价于 TRUST_NONE（不校验） */
+#if defined(THP_HTTP_SKIP_VERIFY) && THP_HTTP_SKIP_VERIFY
+#undef THP_TLS_TRUST
+#define THP_TLS_TRUST THP_TLS_TRUST_NONE
+#endif
 
 static const char *TAG = "thp.report";
 
@@ -42,28 +47,15 @@ static const char *TAG = "thp.report";
 #ifndef THP_REPORT_RETRY_BASE_MS
 #define THP_REPORT_RETRY_BASE_MS 2000
 #endif
-/* probe_api DNS+connect 约 10+10s，剩余预算不足则跳过 */
 #define THP_PROBE_MIN_REMAIN_MS 20000
-
 #define HTTP_RECV_BUF 1024
 
 static SemaphoreHandle_t s_net_mtx;
-/** 本周期是否已做过 probe（每周期最多一次，且须有预算） */
 static bool s_probe_this_cycle;
 
 void thp_report_new_cycle(void)
 {
     s_probe_this_cycle = false;
-}
-
-static const char *token_for_kind(thp_device_kind_t k)
-{
-    return (k == THP_KIND_MI) ? THP_MI_DEVICE_TOKEN : THP_DEVICE_TOKEN;
-}
-
-static const char *device_id_for_kind(thp_device_kind_t k)
-{
-    return (k == THP_KIND_MI) ? THP_MI_DEVICE_ID : THP_DEVICE_ID;
 }
 
 esp_err_t thp_report_init(void)
@@ -126,7 +118,7 @@ void thp_report_probe_api(void)
     struct addrinfo *res = NULL;
     int gai = getaddrinfo(host, port_str, &hints, &res);
     if (gai != 0 || res == NULL) {
-        ESP_LOGE(TAG, "DNS 解析失败 host=%s gai=%d（检查路由器 DNS / 域名）", host, gai);
+        ESP_LOGE(TAG, "DNS 解析失败 host=%s gai=%d", host, gai);
         return;
     }
 
@@ -149,13 +141,11 @@ void thp_report_probe_api(void)
     int cr = connect(sock, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     if (cr != 0) {
-        ESP_LOGE(TAG, "TCP connect %s:%u 失败 errno=%d（多半是 IPv6/路由/防火墙/被墙）",
-                 ipstr, (unsigned)port, errno);
+        ESP_LOGE(TAG, "TCP connect %s:%u 失败 errno=%d", ipstr, (unsigned)port, errno);
         close(sock);
         return;
     }
-    ESP_LOGI(TAG, "TCP connect %s:%u OK（若 HTTPS 仍失败，问题在 TLS/证书/运营商）",
-             ipstr, (unsigned)port);
+    ESP_LOGI(TAG, "TCP connect %s:%u OK", ipstr, (unsigned)port);
     close(sock);
 }
 
@@ -166,9 +156,7 @@ static void maybe_probe_api(TickType_t deadline, bool backfill)
     }
     int32_t remain = thp_deadline_remain_ms(deadline);
     if (remain < THP_PROBE_MIN_REMAIN_MS) {
-        ESP_LOGW(TAG, "剩余预算 %dms < %dms，跳过 probe_api",
-                 (int)remain, THP_PROBE_MIN_REMAIN_MS);
-        s_probe_this_cycle = true; /* 本周期不再尝试 */
+        s_probe_this_cycle = true;
         return;
     }
     s_probe_this_cycle = true;
@@ -196,22 +184,70 @@ static bool json_append(char *buf, size_t cap, size_t *used, const char *fmt, ..
     return true;
 }
 
-static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t n)
+/** 将 device_id 转义后写入 JSON 字符串字面量（不含引号） */
+static bool json_escape_into(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    if (dst == NULL || cap == 0) {
+        return false;
+    }
+    for (const char *p = src; *p != '\0'; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            if (o + 2 >= cap) {
+                dst[0] = '\0';
+                return false;
+            }
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+            continue;
+        }
+        if (c < 0x20) {
+            if (o + 6 >= cap) {
+                dst[0] = '\0';
+                return false;
+            }
+            snprintf(dst + o, cap - o, "\\u%04x", (unsigned)c);
+            o += 6;
+            continue;
+        }
+        if (o + 1 >= cap) {
+            dst[0] = '\0';
+            return false;
+        }
+        dst[o++] = (char)c;
+    }
+    dst[o] = '\0';
+    return true;
+}
+
+/** 成功写出完整 metrics 与可选附加字段；metrics 为空则失败（禁止 `{,\"rssi\"…}`） */
+static bool build_json(const thp_reading_t *r, bool backfill, char *buf, size_t n)
 {
     char live_iso[ISO_UTC_BUF_LEN];
-    char device_part[96];
+    char device_part[128];
     char measured_part[64];
     char ts_part[64];
     char metrics[96];
+    char escaped_id[96];
     int rssi = r->rssi;
     size_t used = 0;
     bool metrics_ok = true;
+    bool any_metric = r->has_th || r->has_p;
+
+    if (buf == NULL || n == 0 || !any_metric) {
+        if (buf != NULL && n > 0) {
+            buf[0] = '\0';
+        }
+        return false;
+    }
 
     device_part[0] = '\0';
     {
-        const char *did = device_id_for_kind(r->kind);
-        if (did[0] != '\0') {
-            snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", did);
+        const char *did = thp_source_device_id(r->source_id);
+        if (did != NULL && did[0] != '\0' &&
+            json_escape_into(escaped_id, sizeof(escaped_id), did)) {
+            snprintf(device_part, sizeof(device_part), ",\"device_id\":\"%s\"", escaped_id);
         }
     }
 
@@ -233,8 +269,10 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
                                      "\"pressure\":%.2f", (double)r->pressure);
         }
     }
-    if (!metrics_ok && metrics[0] == '\0') {
+    if (!metrics_ok) {
         ESP_LOGE(TAG, "build_json metrics 缓冲不足，丢弃本帧");
+        buf[0] = '\0';
+        return false;
     }
 
     if (backfill) {
@@ -242,13 +280,22 @@ static void build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
             snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", r->iso);
             snprintf(ts_part, sizeof(ts_part), ",\"ts\":\"%s\"", r->iso);
         }
+    } else if (r->has_iso && r->iso[0] != '\0') {
+        /* 实时也用采样时刻，不用组帧时刻 */
+        snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", r->iso);
     } else if (thp_time_format_iso(live_iso)) {
         snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", live_iso);
     }
 
-    snprintf(buf, n,
-             "{%s%s%s%s,\"rssi\":%d}",
-             metrics, device_part, measured_part, ts_part, rssi);
+    int wr = snprintf(buf, n,
+                      "{%s%s%s%s,\"rssi\":%d}",
+                      metrics, device_part, measured_part, ts_part, rssi);
+    if (wr <= 0 || (size_t)wr >= n) {
+        ESP_LOGE(TAG, "build_json 体超长已丢弃");
+        buf[0] = '\0';
+        return false;
+    }
+    return true;
 }
 
 static thp_http_result_t classify_status(int status)
@@ -290,38 +337,51 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     }
     snprintf(url, sizeof(url), "%.*s/api/v1/readings", (int)base_len, base);
 
-    build_json(r, backfill, body, sizeof(body));
-    const char *token = token_for_kind(r->kind);
+    if (!build_json(r, backfill, body, sizeof(body))) {
+        ESP_LOGE(TAG, "build_json 失败 src=%s，丢弃本帧", thp_source_name(r->source_id));
+        *out_status = -1;
+        return THP_HTTP_BAD_PAYLOAD;
+    }
+    const char *token = thp_source_token(r->source_id);
     snprintf(auth, sizeof(auth), "Bearer %s", token);
 
+    /*
+     * TLS 信任：esp_http_client 中 crt_bundle_attach 优先于 cert_pem。
+     * - BUNDLE：只用系统证书包（覆盖公有 CA，含 GTS/LE/DigiCert）
+     * - PINNED ：只用 thp_tls_trust.h 内嵌多根 PEM（bundle 对 GTS 匹配失败时）
+     * - NONE   ：不校验（仅调试；需 sdkconfig 开 ESP_TLS_INSECURE + SKIP_SERVER_CERT_VERIFY）
+     */
     esp_http_client_config_t cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = THP_HTTP_TIMEOUT_MS,
-        .user_agent = "esp32c3-thp-report/1.0",
+        .user_agent = "esp32c3-thp-multi/1.0",
         .buffer_size = 1024,
         .buffer_size_tx = 1024,
         .disable_auto_redirect = true,
-#if !THP_HTTP_SKIP_VERIFY
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .cert_pem = THP_TLS_ROOT_PEM,
-#endif
     };
 
-#if THP_HTTP_SKIP_VERIFY
+#if THP_TLS_TRUST == THP_TLS_TRUST_BUNDLE
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#elif THP_TLS_TRUST == THP_TLS_TRUST_PINNED
+    cfg.cert_pem = THP_TLS_ROOT_PEM;
+#elif THP_TLS_TRUST == THP_TLS_TRUST_NONE
     cfg.skip_cert_common_name_check = true;
     cfg.crt_bundle_attach = NULL;
     cfg.cert_pem = NULL;
+#ifndef CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+#warning "THP_TLS_TRUST_NONE 需要 CONFIG_ESP_TLS_INSECURE + CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY，否则握手会失败"
+#endif
+#else
+#error "THP_TLS_TRUST 取值非法"
 #endif
 
-    ESP_LOGI(TAG, "HTTP open heap=%u url=%s timeout=%dms backfill=%d kind=%s remain=%dms",
-             (unsigned)esp_get_free_heap_size(), url, THP_HTTP_TIMEOUT_MS,
-             (int)backfill, thp_kind_tag(r->kind),
-             (int)thp_deadline_remain_ms(deadline));
+    ESP_LOGI(TAG, "HTTP open heap=%u src=%s backfill=%d remain=%dms",
+             (unsigned)esp_get_free_heap_size(), thp_source_name(r->source_id),
+             (int)backfill, (int)thp_deadline_remain_ms(deadline));
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (client == NULL) {
-        ESP_LOGE(TAG, "HTTP 客户端初始化失败 heap=%u", (unsigned)esp_get_free_heap_size());
         *out_status = -1;
         return THP_HTTP_TRANSIENT;
     }
@@ -335,24 +395,21 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     if (s_net_mtx) {
         net_locked = xSemaphoreTake(s_net_mtx, pdMS_TO_TICKS(THP_HTTP_TIMEOUT_MS)) == pdTRUE;
         if (!net_locked) {
-            ESP_LOGW(TAG, "HTTP 网络锁等待超时 kind=%s，本条按暂态失败处理", thp_kind_tag(r->kind));
             esp_http_client_cleanup(client);
             *out_status = -1;
             return THP_HTTP_TRANSIENT;
         }
     }
 
-    /* C3 单射频：仅在 perform 期间停 BLE 扫描；结束后若仍在窗口内才恢复 */
     atc_ble_stop_scan();
     esp_err_t err = esp_http_client_perform(client);
     atc_ble_resume_scan_if_wanted();
 
     if (net_locked && s_net_mtx) {
         xSemaphoreGive(s_net_mtx);
-        net_locked = false;
     }
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x)  heap=%u  body=%s",
+        ESP_LOGE(TAG, "HTTP 请求失败: %s (0x%x) heap=%u body=%s",
                  esp_err_to_name(err), (unsigned)err,
                  (unsigned)esp_get_free_heap_size(), body);
         maybe_probe_api(deadline, backfill);
@@ -371,14 +428,13 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     }
     esp_http_client_cleanup(client);
 
-    *out_status = status;
-    ESP_LOGI(TAG, "上报[%s] HTTP %d  body=%s  resp=%s",
-             thp_kind_tag(r->kind), status, body, resp[0] ? resp : "(empty)");
-
     if (content_len > HTTP_RECV_BUF - 1) {
         ESP_LOGW(TAG, "响应体超长已截断 (Content-Length=%d)", content_len);
     }
 
+    *out_status = status;
+    ESP_LOGI(TAG, "上报[%s] HTTP %d  body=%s  resp=%s",
+             thp_source_name(r->source_id), status, body, resp[0] ? resp : "(empty)");
     return classify_status(status);
 }
 
@@ -390,12 +446,10 @@ thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill,
     }
     for (int attempt = 0; attempt <= max_retries; attempt++) {
         if (!thp_wifi_is_connected()) {
-            ESP_LOGW(TAG, "Wi-Fi 未连接，等待下一周期");
             return THP_HTTP_TRANSIENT;
         }
         if (thp_deadline_reached(deadline)) {
-            ESP_LOGW(TAG, "周期 deadline 已到，停止上报 kind=%s attempt=%d",
-                     thp_kind_tag(r->kind), attempt);
+            ESP_LOGW(TAG, "周期 deadline 已到，停止上报 src=%s", thp_source_name(r->source_id));
             return THP_HTTP_TRANSIENT;
         }
 
@@ -405,31 +459,25 @@ thp_http_result_t thp_report_with_retry(const thp_reading_t *r, bool backfill,
             return THP_HTTP_OK;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "上报[%s] Token 无效或已吊销 (HTTP %d)，请在 Dash 重新生成",
-                     thp_kind_tag(r->kind), status);
+            ESP_LOGE(TAG, "Token 无效或已吊销 src=%s (HTTP %d)",
+                     thp_source_name(r->source_id), status);
             return THP_HTTP_AUTH_FAIL;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
-            ESP_LOGE(TAG, "服务端拒绝载荷[%s] (HTTP %d)，本周期不重试",
-                     thp_kind_tag(r->kind), status);
+            ESP_LOGE(TAG, "服务端拒绝载荷 src=%s (HTTP %d)",
+                     thp_source_name(r->source_id), status);
             return THP_HTTP_BAD_PAYLOAD;
         }
 
         if (attempt < max_retries) {
             uint32_t backoff = THP_REPORT_RETRY_BASE_MS * (1u << attempt);
             if (thp_deadline_remain_ms(deadline) < (int32_t)backoff + 500) {
-                ESP_LOGW(TAG, "退避 %lums 将超出 deadline，停止重试 kind=%s",
-                         (unsigned long)backoff, thp_kind_tag(r->kind));
                 return THP_HTTP_TRANSIENT;
             }
-            ESP_LOGW(TAG, "上报暂态失败 (attempt=%d/%d status=%d)，%lums 后重试",
-                     attempt + 1, max_retries, status,
+            ESP_LOGW(TAG, "上报暂态失败 src=%s attempt=%d，%lums 后重试",
+                     thp_source_name(r->source_id), attempt + 1,
                      (unsigned long)backoff);
             vTaskDelay(pdMS_TO_TICKS(backoff));
-        } else {
-            ESP_LOGW(TAG, "上报暂态失败 (attempt=%d/%d status=%d)%s",
-                     attempt + 1, max_retries + 1, status,
-                     backfill ? "，本条暂留队列" : "，将入离线队列");
         }
     }
     return THP_HTTP_TRANSIENT;
@@ -440,13 +488,7 @@ void thp_report_or_enqueue(const thp_reading_t *r, TickType_t deadline)
     if (r == NULL) {
         return;
     }
-    if (!thp_wifi_is_connected()) {
-        ESP_LOGW(TAG, "Wi-Fi 未连接，读数直接入离线队列 kind=%s", thp_kind_tag(r->kind));
-        thp_queue_push(r);
-        return;
-    }
-    if (thp_deadline_reached(deadline)) {
-        ESP_LOGW(TAG, "周期预算耗尽，读数直接入离线队列 kind=%s", thp_kind_tag(r->kind));
+    if (!thp_wifi_is_connected() || thp_deadline_reached(deadline)) {
         thp_queue_push(r);
         return;
     }
@@ -454,6 +496,16 @@ void thp_report_or_enqueue(const thp_reading_t *r, TickType_t deadline)
     thp_http_result_t res = thp_report_with_retry(r, false, THP_REPORT_MAX_RETRIES, deadline);
     if (res == THP_HTTP_TRANSIENT) {
         thp_queue_push(r);
+    } else if (res == THP_HTTP_AUTH_FAIL) {
+        ESP_LOGE(TAG, "Token 失效 src=%s，清除积压并停用该源（需更新 Token 后重编译）",
+                 thp_source_name(r->source_id));
+        thp_queue_clear_source(r->source_id);
+        thp_source_set_ready(r->source_id, false);
+    } else if (res == THP_HTTP_BAD_PAYLOAD) {
+        ESP_LOGW(TAG, "丢弃非法载荷 src=%s iso=%s th=%d p=%d",
+                 thp_source_name(r->source_id),
+                 r->has_iso ? r->iso : "(no-ts)",
+                 (int)r->has_th, (int)r->has_p);
     }
 }
 
@@ -462,11 +514,7 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
     if (max_items <= 0) {
         max_items = THP_OFFLINE_FLUSH_MAX_PER_CYCLE;
     }
-    if (!thp_wifi_is_connected()) {
-        return;
-    }
-    if (thp_deadline_reached(deadline)) {
-        ESP_LOGW(TAG, "补传跳过：周期 deadline 已到");
+    if (!thp_wifi_is_connected() || thp_deadline_reached(deadline)) {
         return;
     }
     unsigned pending = thp_queue_count();
@@ -474,18 +522,11 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
         return;
     }
 
-    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d，deadline 剩余 %dms）",
-             pending, max_items, (int)thp_deadline_remain_ms(deadline));
+    ESP_LOGI(TAG, "开始补传离线队列，共 %u 条（本周期最多 %d）", pending, max_items);
 
     int sent_this_cycle = 0;
     while (sent_this_cycle < max_items) {
-        if (thp_deadline_reached(deadline)) {
-            ESP_LOGW(TAG, "补传达到周期 deadline，剩余 %u 条下周期继续",
-                     thp_queue_count());
-            return;
-        }
-        if (!thp_wifi_is_connected()) {
-            ESP_LOGW(TAG, "补传中断：Wi-Fi 断开");
+        if (thp_deadline_reached(deadline) || !thp_wifi_is_connected()) {
             return;
         }
         thp_reading_t item;
@@ -495,8 +536,9 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
 
         thp_http_result_t res = thp_report_with_retry(&item, true, 0, deadline);
         if (res == THP_HTTP_OK) {
-            ESP_LOGI(TAG, "补传成功 kind=%s iso=%s",
-                     thp_kind_tag(item.kind), item.has_iso ? item.iso : "(no-ts)");
+            ESP_LOGI(TAG, "补传成功 src=%s iso=%s",
+                     thp_source_name(item.source_id),
+                     item.has_iso ? item.iso : "(no-ts)");
             thp_queue_pop();
             sent_this_cycle++;
             if (sent_this_cycle < max_items && !thp_deadline_reached(deadline)) {
@@ -505,13 +547,15 @@ void thp_report_flush_queue(int max_items, TickType_t deadline)
             continue;
         }
         if (res == THP_HTTP_AUTH_FAIL) {
-            ESP_LOGE(TAG, "补传遇 Token 失效 kind=%s，清空离线队列", thp_kind_tag(item.kind));
-            thp_queue_clear();
-            return;
+            ESP_LOGE(TAG, "补传遇 Token 失效 src=%s，清该源积压并停用",
+                     thp_source_name(item.source_id));
+            thp_queue_clear_source(item.source_id);
+            thp_source_set_ready(item.source_id, false);
+            continue;
         }
         if (res == THP_HTTP_BAD_PAYLOAD) {
-            ESP_LOGW(TAG, "补传条被服务端拒绝 kind=%s，丢弃 iso=%s",
-                     thp_kind_tag(item.kind),
+            ESP_LOGW(TAG, "补传条非法丢弃 src=%s iso=%s",
+                     thp_source_name(item.source_id),
                      item.has_iso ? item.iso : "(no-ts)");
             thp_queue_pop();
             continue;

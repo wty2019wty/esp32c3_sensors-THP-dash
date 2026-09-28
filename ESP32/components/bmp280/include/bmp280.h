@@ -58,6 +58,10 @@ typedef struct {
     bool present;
 } bmp280_t;
 
+/**
+ * 探测并初始化 BMP280（0x76 → 0x77）。
+ * bmp 须为零初始化结构，或先前调用过本函数；失败路径会摘除已挂载设备。
+ */
 esp_err_t bmp280_init(bmp280_t *bmp, i2c_master_bus_handle_t bus, uint32_t scl_speed_hz);
 esp_err_t bmp280_read(bmp280_t *bmp, float *temp_c, float *press_hpa, float *alt_m, int32_t *t_fine);
 void bmp280_compensate_temperature(const bmp280_t *bmp, int32_t adc_t, float *temp_c, int32_t *t_fine);

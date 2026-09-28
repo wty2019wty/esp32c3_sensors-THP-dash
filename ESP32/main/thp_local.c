@@ -1,4 +1,4 @@
-#include "thp_sensors.h"
+#include "thp_local.h"
 
 #include <string.h>
 
@@ -11,21 +11,20 @@
 #include "bmp280.h"
 #include "i2c_config.h"
 #include "sht40.h"
-#include "thp_config.h"
 #include "thp_types.h"
 
-static const char *TAG = "thp.sensor";
+#include "esp_timer.h"
+
+static const char *TAG = "thp.local";
 
 #define I2C_GLITCH_IGNORE_CNT 7
-#define I2C_TIMEOUT_MS        100
+#define THP_SENSOR_MEDIAN_N     5
+#define THP_SENSOR_BMP_SAMPLES  3
+#define THP_SENSOR_INTER_SAMPLE_MS 20
 
 static i2c_master_bus_handle_t s_bus;
 static sht40_t s_sht;
 static bmp280_t s_bmp;
-
-#define THP_SENSOR_MEDIAN_N     5
-#define THP_SENSOR_BMP_SAMPLES  3
-#define THP_SENSOR_INTER_SAMPLE_MS 20
 
 static float median_f(float *v, int n)
 {
@@ -51,20 +50,53 @@ static void i2c_lines_selftest(void)
         .intr_type = GPIO_INTR_DISABLE,
     };
     if (gpio_config(&cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "I2C 线自检配置失败");
         return;
     }
     vTaskDelay(pdMS_TO_TICKS(10));
     int sda = gpio_get_level(I2C_SDA_GPIO);
     int scl = gpio_get_level(I2C_SCL_GPIO);
-    ESP_LOGI(TAG, "I2C 线自检：SDA=%d SCL=%d (1=可拉高)", sda, scl);
+    ESP_LOGI(TAG, "I2C 线自检：SDA=%d SCL=%d", sda, scl);
     if (sda == 0 || scl == 0) {
-        ESP_LOGW(TAG, "I2C 线无法拉高：检查板载 LED(GPIO8)/短路/上拉电阻");
+        ESP_LOGW(TAG, "I2C 线无法拉高：检查板载 LED(GPIO8)/短路/上拉");
     }
 }
 
-static esp_err_t i2c_bus_init(void)
+/** 读路径全失败：摘除句柄，下一周期热修复可重新 probe/add */
+static void local_drop_sensor(sht40_t *sht, bmp280_t *bmp, bool is_sht)
 {
+    if (is_sht) {
+        if (sht->dev != NULL) {
+            i2c_master_bus_rm_device(sht->dev);
+            sht->dev = NULL;
+        }
+        sht->present = false;
+    } else {
+        if (bmp->dev != NULL) {
+            i2c_master_bus_rm_device(bmp->dev);
+            bmp->dev = NULL;
+        }
+        bmp->present = false;
+    }
+}
+
+static void sensors_retry_init_if_missing(void)
+{
+    /* 驱动 init 失败路径会 remove_device；此处仅在完全无句柄时重试 */
+    if (!s_sht.present && s_sht.dev == NULL) {
+        if (sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
+            ESP_LOGW(TAG, "SHT40 热修复探测成功");
+        }
+    }
+    if (!s_bmp.present && s_bmp.dev == NULL) {
+        if (bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
+            ESP_LOGW(TAG, "BMP280 热修复探测成功");
+        }
+    }
+}
+
+esp_err_t thp_local_init(void)
+{
+    i2c_lines_selftest();
     i2c_master_bus_config_t bus_cfg = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = -1,
@@ -73,80 +105,49 @@ static esp_err_t i2c_bus_init(void)
         .glitch_ignore_cnt = I2C_GLITCH_IGNORE_CNT,
         .flags.enable_internal_pullup = true,
     };
-    return i2c_new_master_bus(&bus_cfg, &s_bus);
-}
-
-static void sensors_retry_init_if_missing(void)
-{
-    if (!s_sht.present) {
-        if (sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
-            ESP_LOGW(TAG, "SHT40 热修复探测成功，恢复温湿度上报");
-        }
-    }
-    if (!s_bmp.present) {
-        if (bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ) == ESP_OK) {
-            ESP_LOGW(TAG, "BMP280 热修复探测成功，恢复气压上报");
-        }
-    }
-}
-
-esp_err_t thp_sensors_init(void)
-{
-    i2c_lines_selftest();
-    esp_err_t err = i2c_bus_init();
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &s_bus);
     if (err != ESP_OK) {
         return err;
     }
 
     err = sht40_init(&s_sht, s_bus, I2C_SCL_SPEED_HZ);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SHT40 初始化失败：暂仅上报气压（若有）；任务内会重试探测（禁止用 BMP 温度替代）");
+        ESP_LOGW(TAG, "SHT40 初始化失败：暂仅气压；禁止用 BMP 温度替代");
     }
     err = bmp280_init(&s_bmp, s_bus, I2C_SCL_SPEED_HZ);
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "BMP280 初始化失败：暂仅上报温湿度（若有）；任务内会重试探测");
-    }
-
-    if (!s_sht.present || !s_bmp.present) {
-        ESP_LOGW(TAG, "传感器未全部就绪（SHT40=%d BMP280=%d），支持仅温湿度或仅气压上报；任务内热修复重试",
-                 s_sht.present, s_bmp.present);
+        ESP_LOGW(TAG, "BMP280 初始化失败：暂仅温湿度");
     }
     return ESP_OK;
 }
 
-bool thp_sensors_present_th(void)
+bool thp_local_present_th(void)
 {
     return s_sht.present;
 }
 
-bool thp_sensors_present_p(void)
+bool thp_local_present_p(void)
 {
     return s_bmp.present;
 }
 
-bool thp_sensors_sample(thp_sample_t *out)
+bool thp_local_sample(thp_sample_t *out)
 {
-    if (out == NULL) {
+    if (out == NULL || s_bus == NULL) {
         return false;
     }
     memset(out, 0, sizeof(*out));
-    if (s_bus == NULL) {
-        return false;
-    }
+    out->sample_mono_ms = esp_timer_get_time() / 1000;
     sensors_retry_init_if_missing();
 
-    float sht_t = 0.0f, sht_h = 0.0f;
-    float bmp_p = 0.0f;
-
-    float ts[THP_SENSOR_MEDIAN_N];
-    float hs[THP_SENSOR_MEDIAN_N];
-    float ps[THP_SENSOR_BMP_SAMPLES];
+    float sht_t = 0, sht_h = 0, bmp_p = 0;
+    float ts[THP_SENSOR_MEDIAN_N], hs[THP_SENSOR_MEDIAN_N], ps[THP_SENSOR_BMP_SAMPLES];
     int nt = 0, np = 0;
+    bool sht_ok = false, bmp_ok = false;
 
-    bool sht_ok = false;
     if (s_sht.present) {
         for (int i = 0; i < THP_SENSOR_MEDIAN_N; i++) {
-            float t = 0.0f, h = 0.0f;
+            float t = 0, h = 0;
             if (sht40_read(&s_sht, &t, &h) == ESP_OK) {
                 ts[nt] = t;
                 hs[nt] = h;
@@ -163,10 +164,9 @@ bool thp_sensors_sample(thp_sample_t *out)
         }
     }
 
-    bool bmp_ok = false;
     if (s_bmp.present) {
         for (int i = 0; i < THP_SENSOR_BMP_SAMPLES; i++) {
-            float bt = 0.0f, bp = 0.0f, balt = 0.0f;
+            float bt = 0, bp = 0, balt = 0;
             if (bmp280_read(&s_bmp, &bt, &bp, &balt, NULL) == ESP_OK) {
                 ps[np] = bp;
                 np++;
@@ -183,7 +183,7 @@ bool thp_sensors_sample(thp_sample_t *out)
         if (!sht_ok && s_sht.present) {
             nt = 0;
             for (int i = 0; i < THP_SENSOR_MEDIAN_N; i++) {
-                float t = 0.0f, h = 0.0f;
+                float t = 0, h = 0;
                 if (sht40_read(&s_sht, &t, &h) == ESP_OK) {
                     ts[nt] = t;
                     hs[nt] = h;
@@ -199,7 +199,7 @@ bool thp_sensors_sample(thp_sample_t *out)
         if (!bmp_ok && s_bmp.present) {
             np = 0;
             for (int i = 0; i < THP_SENSOR_BMP_SAMPLES; i++) {
-                float bt = 0.0f, bp = 0.0f, balt = 0.0f;
+                float bt = 0, bp = 0, balt = 0;
                 if (bmp280_read(&s_bmp, &bt, &bp, &balt, NULL) == ESP_OK) {
                     ps[np] = bp;
                     np++;
@@ -217,31 +217,22 @@ bool thp_sensors_sample(thp_sample_t *out)
         out->temperature = sht_t;
         out->humidity = sht_h;
     } else if (sht_ok) {
-        ESP_LOGW(TAG, "温湿度超范围，本帧不带上报: T=%.2f H=%.2f",
-                 (double)sht_t, (double)sht_h);
+        ESP_LOGW(TAG, "温湿度超范围: T=%.2f H=%.2f", (double)sht_t, (double)sht_h);
+    } else if (s_sht.present) {
+        ESP_LOGW(TAG, "SHT40 本周期读全失败，摘除句柄待热修复");
+        local_drop_sensor(&s_sht, &s_bmp, true);
     }
 
     if (bmp_ok && thp_p_in_range(bmp_p)) {
         out->has_p = true;
         out->pressure = bmp_p;
     } else if (bmp_ok) {
-        ESP_LOGW(TAG, "气压超范围，本帧不带上报: P=%.2f", (double)bmp_p);
+        ESP_LOGW(TAG, "气压超范围: P=%.2f", (double)bmp_p);
+    } else if (s_bmp.present) {
+        ESP_LOGW(TAG, "BMP280 本周期读全失败，摘除句柄待热修复");
+        local_drop_sensor(&s_sht, &s_bmp, false);
     }
 
     out->valid = out->has_th || out->has_p;
-
-    if (!out->valid) {
-        ESP_LOGW(TAG, "采样无有效字段: SHT40=%s BMP280=%s present(th=%d p=%d) n_th=%d n_p=%d",
-                 sht_ok ? "OK" : "FAIL", bmp_ok ? "OK" : "FAIL",
-                 s_sht.present, s_bmp.present, nt, np);
-        return false;
-    }
-
-    if (!sht_ok || !bmp_ok || nt < THP_SENSOR_MEDIAN_N || np < THP_SENSOR_BMP_SAMPLES) {
-        ESP_LOGW(TAG, "采样: SHT40=%s(%d/%d) BMP280=%s(%d/%d) → 上报%s%s",
-                 sht_ok ? "OK" : "FAIL", nt, THP_SENSOR_MEDIAN_N,
-                 bmp_ok ? "OK" : "FAIL", np, THP_SENSOR_BMP_SAMPLES,
-                 out->has_th ? " 温湿度" : "", out->has_p ? " 气压" : "");
-    }
-    return true;
+    return out->valid;
 }

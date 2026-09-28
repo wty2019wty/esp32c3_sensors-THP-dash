@@ -8,7 +8,6 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
-#include "freertos/task.h"
 
 #include "thp_config.h"
 
@@ -16,8 +15,6 @@ static const char *TAG = "thp.wifi";
 
 #define WIFI_CONNECTED_BIT  BIT0
 #define WIFI_FAIL_BIT       BIT1
-
-/* 断线后无限重连（传感器场景）；计数仅用于日志节奏 */
 #define WIFI_RETRY_LOG_EVERY 8
 
 static EventGroupHandle_t s_wifi_events;
@@ -79,7 +76,6 @@ esp_err_t thp_wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    /* Super Mini 天线差：单位 0.25 dBm，夹到 8~20 dBm */
     int8_t tx_dbm = (int8_t)THP_WIFI_STA_TX_POWER_DBM;
     if (tx_dbm < 8) {
         tx_dbm = 8;
