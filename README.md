@@ -7,7 +7,7 @@ ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash + 设备端�
 ## 架构
 
 ```
-ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/ESP32-refactor]
+ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/]
   + N× ATC/BTHome BLE 温湿度计（各自 Token）
     │  HTTPS POST /api/v1/readings
     │  Authorization: Bearer <source_token>
@@ -31,15 +31,17 @@ Pages Dash（自建登录会话 Cookie）
 | `schema.sql` | D1 表结构（users/sessions/devices/api_tokens/readings） |
 | `wrangler.jsonc` | Worker + D1 + 静态资源绑定（`database_id` 部署前需回填） |
 | `src/` | Worker 源码（鉴权、上报、查询、降采样、CSV） |
-| `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
-| `desktop-1280.png` | Dash 桌面端界面预览（README「界面预览」） |
-| `REQUIREMENTS.md` | 完整需求、已拍板决策与实现状态 |
 | `src/lib/schema.js` | Worker 内幂等 DDL（缺表时自动建表） |
+| `public/` | Dash（`index.html` + `css` + `js`），含本地演示模式 |
+| `desktop-1280.png` | Dash 桌面端界面预览 |
 | `tools/submit_readings.py` | 模拟设备上报（测试 Token / 回填曲线） |
 | `tools/local_e2e.py` | 本地登录→建设备→Token→上报 冒烟 |
 | `tools/test_export_strategy.mjs` | 降采样/导出策略纯函数单测（无需 D1） |
 | `tools/test_load_series_mock.mjs` | `loadSeries` 安全护栏 mock 单测（无需 wrangler） |
-| `ESP32/` | ESP32-C3 固件（SHT40+BMP280 → HTTPS 上报），见 [ESP32/README.md](./ESP32/README.md) |
+| `tools/test_partial_readings.mjs` | 部分字段上报校验单测 |
+| `tools/test_atc_parse.mjs` | ATC/BTHome 解析单测 |
+| `ESP32/` | ESP32-C3 多设备固件（本机 + N 台 BLE），见 [ESP32/README.md](./ESP32/README.md) |
+| `ESPHome/` | ESPHome 实验配置（**不好用，仅存档**），见 [ESPHome/README.md](./ESPHome/README.md) |
 
 ## 功能对照
 
@@ -188,10 +190,12 @@ npm run dev
 | `npm run db:tables` | 查本地 `sqlite_master` | 列出本地 D1 表 |
 | `npm run dev` | `wrangler dev` | 本地开发服务 |
 | `npm run deploy` | `wrangler deploy` | 部署 Worker（需先回填真实 `database_id`） |
-| `npm run check` | `node --check` 全部 `src/` + `public/js` | 源码语法检查（已通过） |
+| `npm run check` | `node --check` 全部 `src/` + `public/js` + 部分校验脚本 | 源码语法检查 |
 | `npm run test:downsample` | `node tools/test_export_strategy.mjs` | 降采样/导出策略单测（无需 D1） |
 | `npm run test:loadseries` | `node tools/test_load_series_mock.mjs` | `loadSeries` 安全护栏 mock 单测 |
-| `npm run test:unit` | 上述两项 | 离线单元测试 |
+| `npm run test:partial` | `node tools/test_partial_readings.mjs` | 部分字段上报校验单测 |
+| `npm run test:atc` | `node tools/test_atc_parse.mjs` | ATC/BTHome 解析单测 |
+| `npm run test:unit` | 上述四项 | 离线单元测试 |
 
 ### 单元测试（不启 Worker）
 
@@ -200,7 +204,7 @@ npm run dev
 npm run test:unit
 ```
 
-覆盖：时间范围 → 粒度阶梯、行数上限自动降档、SQL 失败时的安全回退、避免整表拉原始点等。本地 E2E 仍用 `python tools/local_e2e.py`（需 `npm run dev`）。
+覆盖：时间范围 → 粒度阶梯、行数上限自动降档、SQL 失败时的安全回退、避免整表拉原始点、部分字段校验、ATC/BTHome 解析。本地 E2E 仍用 `python tools/local_e2e.py`（需 `npm run dev`）。
 
 ### 本地 HTTP 探测（PowerShell）
 
@@ -350,22 +354,21 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 ## ESP32-C3 固件
 
-| 工程 | 说明 | 文档 |
-|------|------|------|
-| [`ESP32/ESP32-refactor/`](./ESP32/ESP32-refactor/) | **推荐**。多设备：本机 SHT40+BMP280 + N 台 ATC/BTHome BLE，源表 Token | [README](./ESP32/ESP32-refactor/README.md) · [DESIGN](./ESP32/ESP32-refactor/DESIGN.md) |
-| [`ESP32/`](./ESP32/) | 原单设备固件（LOCAL + 可选 1 台 MI） | [ESP32/README.md](./ESP32/README.md) |
+工程在 [`ESP32/`](./ESP32/)
 
-两者协议一致：HTTPS `POST /api/v1/readings` + Bearer Token。
-
-- 框架：ESP-IDF（sht40 bmp280）
+- 文档：[ESP32/README.md](./ESP32/README.md)
+- 框架：ESP-IDF（sht40 / bmp280 / atc_ble）
+- 数据源：本机 SHT40 + BMP280 + 0..N 台 ATC/BTHome BLE，每源独立 Token
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
 - 部分上报：允许仅温湿度或仅气压；JSON 省略缺失字段；云端列为可空
-- 节奏：默认 5 分钟上报一帧；网络/5xx 有限退避，401/403/400 不重发
+- 节奏：默认 5 分钟一周期；**扫描窗内禁 HTTP/NTP**；网络/5xx 有限退避，401/403/400 不重发
 - 时间戳：`measured_at` / 补传 `ts` 为**采样时刻** UTC（mono 回填）；实时不带 `ts`
-- TLS：BUNDLE / PINNED / NONE 三选一（refactor）；原版内嵌 GTS 根 + bundle。均关闭 IPv6
-- 产物：refactor `ESP32/ESP32-refactor/build/esp32c3_thp_multi.bin`；原版 `ESP32/build/esp32c3_thp_report.bin`
-- 配置：`thp_config.h`（Token/密码/BindKey **不入库**；仓库仅 `.example`）
+- TLS：`THP_TLS_TRUST` = BUNDLE / PINNED / NONE 三选一；默认关闭 IPv6
+- 产物：`ESP32/build/esp32c3_thp_multi.bin`（`esp32c3_thp_multi`）
+- 配置：`ESP32/main/thp_config.h`（Token/密码/BindKey **不入库**；仓库仅 `.example`）
 - 前置：Dash 为每个源建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP
+
+更细的硬件、烧录与协议说明见 `ESP32/README.md`
 
 ## 许可证
 
