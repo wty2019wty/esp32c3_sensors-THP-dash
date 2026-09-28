@@ -1,0 +1,84 @@
+/*
+ * THP 多设备本地配置模板
+ *
+ * 用法：copy thp_config.h.example thp_config.h 后填入真实值。
+ * thp_config.h 已 gitignore，Token / 密码 / BindKey 不得提交。
+ */
+#pragma once
+
+/* ---------------- Wi-Fi STA ---------------- */
+#define THP_WIFI_SSID           "your-wifi-ssid"
+#define THP_WIFI_PASSWORD       "your-wifi-password"
+#define THP_WIFI_CONNECT_TIMEOUT_MS  30000
+#define THP_WIFI_STA_TX_POWER_DBM   15
+
+/* ---------------- THP API ----------------
+ * 本地：http://<电脑局域网IP>:8787
+ * 线上：https://xxx.workers.dev
+ * 不要写 127.0.0.1（ESP32 上是它自己）。
+ */
+#define THP_API_BASE            "http://192.168.1.10:8787"
+
+/* ---------------- 源 0：本机 I2C（SHT40 + BMP280） ---------------- */
+#define THP_LOCAL_TOKEN         "thp_replace_me_local"
+#define THP_LOCAL_DEVICE_ID     ""
+
+/* ---------------- 源 1..N：BLE ATC / BTHome ----------------
+ * 每台设备在 Dash 各建设备、各生成 Token。
+ * mac：显示序，如 A4:C1:38:E2:4E:43（界面 8 字节取前 6）。
+ * bindkey：32 hex；明文 beacon 可留空 "" 或全 0。
+ * 最多建议 4 台（每台每周期一条 HTTPS）。
+ */
+#define THP_BLE_ENABLE 1
+
+typedef struct {
+    const char *name;
+    const char *mac;
+    const char *bindkey;
+    const char *token;
+    const char *device_id;
+} thp_ble_cfg_entry_t;
+
+#define THP_BLE_DEVICES { \
+    { .name = "ble0", \
+      .mac = "A4:C1:38:E2:4E:43", \
+      .bindkey = "00000000000000000000000000000000", \
+      .token = "thp_replace_me_ble0", \
+      .device_id = "" }, \
+    { .name = "ble1", \
+      .mac = "B4:C1:38:00:00:01", \
+      .bindkey = "", \
+      .token = "thp_replace_me_ble1", \
+      .device_id = "" }, \
+}
+
+/* ---------------- 上报节奏 / 离线 / HTTP ---------------- */
+#define THP_REPORT_PERIOD_MS    (5 * 60 * 1000)
+#define THP_REPORT_FIRST_DELAY_MS  5000
+#define THP_REPORT_MAX_RETRIES  3
+#define THP_REPORT_RETRY_BASE_MS 2000
+
+#define THP_OFFLINE_QUEUE_LEN     576
+#define THP_OFFLINE_FLUSH_GAP_MS  200
+#define THP_OFFLINE_FLUSH_MAX_PER_CYCLE  24
+
+#define THP_HTTP_TIMEOUT_MS     15000
+#define THP_CYCLE_DEADLINE_MARGIN_MS  20000
+
+/* ---------------- NTP ---------------- */
+#define THP_NTP_RESYNC_EVERY_CYCLES   12
+#define THP_NTP_NUM_SERVERS         4
+#define THP_NTP_SERVER_LIST ESP_SNTP_SERVER_LIST( \
+    "ntp.aliyun.com", \
+    "cn.pool.ntp.org", \
+    "ntp.ntsc.ac.cn", \
+    "pool.ntp.org")
+#define THP_NTP_SYNC_TIMEOUT_MS     20000
+
+#define THP_HTTP_SKIP_VERIFY    0
+
+/* ---------------- BLE 窗口 ---------------- */
+#define THP_BLE_SCAN_OPEN_BEFORE_MS   5000
+#define THP_BLE_SCAN_CLOSE_AFTER_MS   10000
+#define THP_BLE_MAX_AGE_MS              (3 * THP_REPORT_PERIOD_MS)
+#define THP_BLE_HEAP_MIN_REPORT 70000
