@@ -1,5 +1,8 @@
 # ESP32-C3 固件：THP HTTPS 上报
 
+> **多设备版请用 [ESP32-refactor/](./ESP32-refactor/)**（LOCAL + N 台 BLE 源表，重构完成）。
+> 本目录为原单设备固件，语义仍有效，协议一致；新部署建议直接用 refactor。
+
 设备端采样并上报到本仓库云端 Worker（`POST /api/v1/readings`）。  
 ESP-IDF，新版 `i2c_master`
 

@@ -7,9 +7,10 @@ ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash + 设备端�
 ## 架构
 
 ```
-ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/]
+ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/ESP32-refactor]
+  + N× ATC/BTHome BLE 温湿度计（各自 Token）
     │  HTTPS POST /api/v1/readings
-    │  Authorization: Bearer <device_token>
+    │  Authorization: Bearer <source_token>
     ▼
 Cloudflare Worker ── D1 (readings 永久保留)
     ▲
@@ -349,19 +350,22 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 ## ESP32-C3 固件
 
-固件工程在 [`ESP32/`](./ESP32/)，说明见 [ESP32/README.md](./ESP32/README.md)。
+| 工程 | 说明 | 文档 |
+|------|------|------|
+| [`ESP32/ESP32-refactor/`](./ESP32/ESP32-refactor/) | **推荐**。多设备：本机 SHT40+BMP280 + N 台 ATC/BTHome BLE，源表 Token | [README](./ESP32/ESP32-refactor/README.md) · [DESIGN](./ESP32/ESP32-refactor/DESIGN.md) |
+| [`ESP32/`](./ESP32/) | 原单设备固件（LOCAL + 可选 1 台 MI） | [ESP32/README.md](./ESP32/README.md) |
+
+两者协议一致：HTTPS `POST /api/v1/readings` + Bearer Token。
 
 - 框架：ESP-IDF（sht40 bmp280）
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
 - 部分上报：允许仅温湿度或仅气压；JSON 省略缺失字段；云端列为可空
-- 节奏：默认 5 分钟 HTTPS `POST /api/v1/readings` + Bearer Token
-- 配置：`ESP32/main/thp_config.h`（Wi-Fi / API Base / Token，**不入库**；仓库仅 `.example`）
-- 重试：网络与 5xx 有限退避；401/403/400 不重发
-- TLS：内嵌 Cloudflare 所用 GTS 根证书（`main/thp_tls_trust.h`），并关闭 IPv6 规避 AAAA 连不通
-- 本机构建：`ESP32/build/esp32c3_thp_report.bin` 与 `esp32c3_thp_report_flashed.bin` 已生成（2026-09）
-- 前置：Dash 新建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP；上生产须改为线上 Worker 域名并重新烧录
-
-更细的硬件、烧录与协议说明见 `ESP32/README.md`
+- 节奏：默认 5 分钟上报一帧；网络/5xx 有限退避，401/403/400 不重发
+- 时间戳：`measured_at` / 补传 `ts` 为**采样时刻** UTC（mono 回填）；实时不带 `ts`
+- TLS：BUNDLE / PINNED / NONE 三选一（refactor）；原版内嵌 GTS 根 + bundle。均关闭 IPv6
+- 产物：refactor `ESP32/ESP32-refactor/build/esp32c3_thp_multi.bin`；原版 `ESP32/build/esp32c3_thp_report.bin`
+- 配置：`thp_config.h`（Token/密码/BindKey **不入库**；仓库仅 `.example`）
+- 前置：Dash 为每个源建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP
 
 ## 许可证
 
