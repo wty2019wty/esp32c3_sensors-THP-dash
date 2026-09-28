@@ -8,7 +8,7 @@ ESP32-C3 温湿度气压监控：**CF Worker API + D1 + Pages Dash + 设备端�
 
 ```
 ESP32-C3 (SHT40 + BMP280)  [固件：ESP32/]
-  + N× ATC/BTHome BLE 温湿度计（各自 Token）
+  + N× ATC/BTHome BLE 温湿度计（每源一枚 Token）
     │  HTTPS POST /api/v1/readings
     │  Authorization: Bearer <source_token>
     ▼
@@ -358,7 +358,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 
 - 文档：[ESP32/README.md](./ESP32/README.md)
 - 框架：ESP-IDF（sht40 / bmp280 / atc_ble）
-- 数据源：本机 SHT40 + BMP280 + 0..N 台 ATC/BTHome BLE，每源独立 Token
+- 数据源：本机 SHT40 + BMP280，外加 0..N 台 ATC/BTHome BLE；每个源使用自己的 Token
 - 口径：SHT40 → 温度/湿度；BMP280 → 气压（BMP 内部温度不入库）
 - 部分上报：允许仅温湿度或仅气压；JSON 省略缺失字段；云端列为可空
 - 节奏：默认 5 分钟一周期；**扫描窗内禁 HTTP/NTP**；网络/5xx 有限退避，401/403/400 不重发
@@ -366,7 +366,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 - TLS：`THP_TLS_TRUST` = BUNDLE / PINNED / NONE 三选一；默认关闭 IPv6
 - 产物：`ESP32/build/esp32c3_thp_multi.bin`（`esp32c3_thp_multi`）
 - 配置：`ESP32/main/thp_config.h`（Token/密码/BindKey **不入库**；仓库仅 `.example`）
-- 前置：Dash 为每个源建设备并生成 Token；本地 dev 时 `THP_API_BASE` 须为电脑局域网 IP
+- 前置：在 Dash 为每个源建设备并生成 Token；本地调试时 `THP_API_BASE` 填电脑局域网 IP
 
 更细的硬件、烧录与协议说明见 `ESP32/README.md`
 

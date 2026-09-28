@@ -1,7 +1,7 @@
 # THP 多设备固件（ESP32）
 
-按 **多设备源表** 建模的 ESP32-C3 固件：本机 SHT40+BMP280 + N 台 ATC/BTHome BLE 温湿度计，
-各自 Token 上报到 THP Dash（`POST /api/v1/readings`）。协议与云端 Worker 一致。
+ESP32-C3 多设备固件：本机接 SHT40 + BMP280，再被动扫描 0..N 台 ATC/BTHome BLE 温湿度计。
+每个数据源使用自己的 Token，通过 `POST /api/v1/readings` 上报到 THP Dash。协议与云端 Worker 一致。
 
 ## 硬件
 
@@ -125,7 +125,7 @@ copy main\thp_config.h.example main\thp_config.h
 ```
 
 - `mac` 显示序（如 `A4:C1:38:E2:4E:43`）；`bindkey` 32 hex，明文可 `""` 或全 0
-- 每台 BLE 在 Dash **各建设备、各生成 Token**
+- 每台 BLE 都要在 Dash 上单独建一个 device，并生成对应 Token
 - 建议 ≤4 台（每台每周期一条 HTTPS）；硬上限 `ATC_BLE_MAX_DEVICES=8`
 
 ### TLS 信任怎么选
