@@ -4,6 +4,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #include "freertos/FreeRTOS.h"
@@ -45,14 +46,15 @@ typedef struct {
     bool    has_iso;
 } thp_reading_t;
 
-/** 本机 I2C 采样结果 */
+/** 本机 I2C 采样结果；sample_mono_ms = esp_timer 毫秒（采样时刻） */
 typedef struct {
-    float temperature;
-    float humidity;
-    float pressure;
-    bool  has_th;
-    bool  has_p;
-    bool  valid;
+    float   temperature;
+    float   humidity;
+    float   pressure;
+    bool    has_th;
+    bool    has_p;
+    bool    valid;
+    int64_t sample_mono_ms;
 } thp_sample_t;
 
 typedef enum {

@@ -11,7 +11,7 @@
 static const char *TAG = "thp.queue";
 
 #ifndef THP_OFFLINE_QUEUE_LEN
-#define THP_OFFLINE_QUEUE_LEN 576
+#define THP_OFFLINE_QUEUE_LEN 256
 #endif
 
 static thp_reading_t s_offline_q[THP_OFFLINE_QUEUE_LEN];

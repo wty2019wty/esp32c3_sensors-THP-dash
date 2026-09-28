@@ -104,6 +104,8 @@ static void report_one_ble(uint8_t source_id, int64_t cycle_ref_ms, TickType_t d
     reading.has_th = true;
     reading.has_p = false;
     reading.rssi = (int)mi.rssi;
+    /* iso 对齐帧接收时刻（mi.ts_ms），而不是组帧/HTTP 时刻 */
+    thp_time_fill_sample_iso(&reading, mi.ts_ms);
 
     unsigned heap = (unsigned)esp_get_free_heap_size();
     ESP_LOGI(TAG, "BLE[%s] 窗口样本 T=%.2f°C H=%.2f%% rssi=%d dist_to_T=%+lldms heap=%u remain=%dms",

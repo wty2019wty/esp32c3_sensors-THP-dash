@@ -5,6 +5,7 @@
 
 #include "esp_log.h"
 #include "esp_netif_sntp.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 
@@ -226,7 +227,46 @@ void thp_time_stamp_reading(thp_reading_t *r)
     if (thp_wifi_get_rssi(&rssi)) {
         r->rssi = rssi;
     }
-    if (thp_time_is_synced()) {
-        r->has_iso = thp_time_format_iso(r->iso);
+}
+
+bool thp_time_fill_sample_iso(thp_reading_t *r, int64_t sample_mono_ms)
+{
+    if (r == NULL) {
+        return false;
     }
+    r->has_iso = false;
+    r->iso[0] = '\0';
+    if (!thp_time_is_synced()) {
+        return false;
+    }
+
+    time_t now_wall = 0;
+    time(&now_wall);
+    if (now_wall < 1600000000) {
+        return false;
+    }
+
+    int64_t now_mono = esp_timer_get_time() / 1000;
+    int64_t skew_ms = now_mono - sample_mono_ms;
+    /* 异常回拨/超长漂移：退回“现在”，避免写出离谱时间戳 */
+    if (skew_ms < 0 || skew_ms > (int64_t)3 * 60 * 60 * 1000) {
+        skew_ms = 0;
+        sample_mono_ms = now_mono;
+    }
+
+    time_t sample_wall = now_wall - (time_t)(skew_ms / 1000);
+    if (!thp_time_format_iso_at(sample_wall, r->iso)) {
+        return false;
+    }
+
+    int ms = (int)(sample_mono_ms % 1000);
+    if (ms < 0) {
+        ms = 0;
+    }
+    size_t len = strlen(r->iso);
+    if (len >= 5) {
+        snprintf(r->iso + len - 5, 6, ".%03dZ", ms);
+    }
+    r->has_iso = r->iso[0] != '\0';
+    return r->has_iso;
 }

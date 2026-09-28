@@ -44,11 +44,16 @@ CONFIG_LWIP_DHCP_GET_NTP_SRV=n
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 # 部分域名 走 GTS Root R4（交叉签名到 GlobalSign）。IDF6 捆绑包校验
 # 对该链可能报 "No matching trusted root"（issue #18674）。开启交叉签名校验
-# 并放宽证书数量；同时固件 main/thp_tls_trust.h 内嵌 GTS Root R4 作为 cert_pem。
+# 并放宽证书数量。若仍失败，将 thp_config.h 的 THP_TLS_TRUST 改为 1（PINNED，
+# 使用 thp_tls_trust.h 内嵌根）；或 2（NONE，仅调试）。
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=y
 CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_MAX_CERTS=512
 CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN=4096
 CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN=4096
+
+# 仅当 THP_TLS_TRUST=2 / THP_HTTP_SKIP_VERIFY=1 时打开（切勿用于生产）：
+# CONFIG_ESP_TLS_INSECURE=y
+# CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
 
 # 日志
 # 连不上时把 esp-tls 细节打出来（连接成功后可改回 INFO 降噪）

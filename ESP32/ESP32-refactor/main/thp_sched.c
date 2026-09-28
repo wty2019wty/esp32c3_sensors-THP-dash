@@ -71,6 +71,7 @@ static void stage_local_report(const thp_sample_t *sample, TickType_t deadline)
     reading.pressure = sample->pressure;
     reading.has_th = sample->has_th;
     reading.has_p = sample->has_p;
+    thp_time_fill_sample_iso(&reading, sample->sample_mono_ms);
 
     ESP_LOGI(TAG, "上报[local] iso=%s (deadline 剩余 %dms)",
              reading.has_iso ? reading.iso : "(no-ts)",

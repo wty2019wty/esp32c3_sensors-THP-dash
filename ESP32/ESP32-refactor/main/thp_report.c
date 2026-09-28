@@ -24,6 +24,12 @@
 #include "thp_types.h"
 #include "thp_wifi.h"
 
+/* 兼容旧宏：THP_HTTP_SKIP_VERIFY=1 等价于 TRUST_NONE（不校验） */
+#if defined(THP_HTTP_SKIP_VERIFY) && THP_HTTP_SKIP_VERIFY
+#undef THP_TLS_TRUST
+#define THP_TLS_TRUST THP_TLS_TRUST_NONE
+#endif
+
 static const char *TAG = "thp.report";
 
 #ifndef THP_HTTP_TIMEOUT_MS
@@ -274,6 +280,9 @@ static bool build_json(const thp_reading_t *r, bool backfill, char *buf, size_t 
             snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", r->iso);
             snprintf(ts_part, sizeof(ts_part), ",\"ts\":\"%s\"", r->iso);
         }
+    } else if (r->has_iso && r->iso[0] != '\0') {
+        /* 实时也用采样时刻，不用组帧时刻 */
+        snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", r->iso);
     } else if (thp_time_format_iso(live_iso)) {
         snprintf(measured_part, sizeof(measured_part), ",\"measured_at\":\"%s\"", live_iso);
     }
@@ -336,6 +345,12 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     const char *token = thp_source_token(r->source_id);
     snprintf(auth, sizeof(auth), "Bearer %s", token);
 
+    /*
+     * TLS 信任：esp_http_client 中 crt_bundle_attach 优先于 cert_pem。
+     * - BUNDLE：只用系统证书包（覆盖公有 CA，含 GTS/LE/DigiCert）
+     * - PINNED ：只用 thp_tls_trust.h 内嵌多根 PEM（bundle 对 GTS 匹配失败时）
+     * - NONE   ：不校验（仅调试；需 sdkconfig 开 ESP_TLS_INSECURE + SKIP_SERVER_CERT_VERIFY）
+     */
     esp_http_client_config_t cfg = {
         .url = url,
         .method = HTTP_METHOD_POST,
@@ -344,16 +359,21 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
         .buffer_size = 1024,
         .buffer_size_tx = 1024,
         .disable_auto_redirect = true,
-#if !THP_HTTP_SKIP_VERIFY
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .cert_pem = THP_TLS_ROOT_PEM,
-#endif
     };
 
-#if THP_HTTP_SKIP_VERIFY
+#if THP_TLS_TRUST == THP_TLS_TRUST_BUNDLE
+    cfg.crt_bundle_attach = esp_crt_bundle_attach;
+#elif THP_TLS_TRUST == THP_TLS_TRUST_PINNED
+    cfg.cert_pem = THP_TLS_ROOT_PEM;
+#elif THP_TLS_TRUST == THP_TLS_TRUST_NONE
     cfg.skip_cert_common_name_check = true;
     cfg.crt_bundle_attach = NULL;
     cfg.cert_pem = NULL;
+#ifndef CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY
+#warning "THP_TLS_TRUST_NONE 需要 CONFIG_ESP_TLS_INSECURE + CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY，否则握手会失败"
+#endif
+#else
+#error "THP_TLS_TRUST 取值非法"
 #endif
 
     ESP_LOGI(TAG, "HTTP open heap=%u src=%s backfill=%d remain=%dms",

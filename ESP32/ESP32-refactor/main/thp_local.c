@@ -13,6 +13,8 @@
 #include "sht40.h"
 #include "thp_types.h"
 
+#include "esp_timer.h"
+
 static const char *TAG = "thp.local";
 
 #define I2C_GLITCH_IGNORE_CNT 7
@@ -135,6 +137,7 @@ bool thp_local_sample(thp_sample_t *out)
         return false;
     }
     memset(out, 0, sizeof(*out));
+    out->sample_mono_ms = esp_timer_get_time() / 1000;
     sensors_retry_init_if_missing();
 
     float sht_t = 0, sht_h = 0, bmp_p = 0;

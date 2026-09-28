@@ -58,7 +58,7 @@ typedef struct {
 #define THP_REPORT_MAX_RETRIES  3
 #define THP_REPORT_RETRY_BASE_MS 2000
 
-#define THP_OFFLINE_QUEUE_LEN     576
+#define THP_OFFLINE_QUEUE_LEN     256
 #define THP_OFFLINE_FLUSH_GAP_MS  200
 #define THP_OFFLINE_FLUSH_MAX_PER_CYCLE  24
 
@@ -75,6 +75,10 @@ typedef struct {
     "pool.ntp.org")
 #define THP_NTP_SYNC_TIMEOUT_MS     20000
 
+/* TLS 信任：0=证书包（默认） 1=内嵌根 2=不校验（调试）
+ * 详见 thp_tls_trust.h。THP_HTTP_SKIP_VERIFY 保留兼容，等价于 TRUST_NONE。
+ */
+#define THP_TLS_TRUST           0
 #define THP_HTTP_SKIP_VERIFY    0
 
 /* ---------------- BLE 窗口 ---------------- */
