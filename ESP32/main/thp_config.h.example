@@ -86,3 +86,10 @@ typedef struct {
 #define THP_BLE_SCAN_CLOSE_AFTER_MS   10000
 #define THP_BLE_MAX_AGE_MS              (3 * THP_REPORT_PERIOD_MS)
 #define THP_BLE_HEAP_MIN_REPORT 70000
+
+/* ---------------- RSSI 实时打印（测试用，量产改 0） ---------------- */
+#define THP_RSSI_DEBUG              0
+#define THP_RSSI_DEBUG_INTERVAL_MS  2000
+/* 1=忽略窗口开关持续 BLE 扫描，便于实时看信号；HTTP 期间仍会暂停。
+ * 注意：会关闭省电的窗口扫描，射频常开，功耗与 Wi-Fi 共存变差，仅调试期使用。 */
+#define THP_RSSI_DEBUG_HOLD_SCAN    1
