@@ -665,6 +665,53 @@ body.chart-fs-open .admin-panel {
   flex-wrap: wrap;
 }
 
+/* 图例叠加在图表内部（不占图外布局高度） */
+.chart-stage {
+  position: relative;
+}
+
+.chart-overlay {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  max-width: calc(100% - 24px);
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.chart-overlay .legend {
+  pointer-events: auto;
+  flex-wrap: nowrap;
+  gap: 4px;
+  padding: 2px 4px;
+  border-radius: 999px;
+  border: 1px solid rgba(36, 48, 68, 0.85);
+  background: rgba(11, 18, 32, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+.chart-overlay .legend .legend-item {
+  min-height: 26px;
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  border-color: transparent;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.chart-overlay .legend-item.active {
+  border-color: #3a4d6a;
+}
+
+.chart-overlay .legend-item i {
+  width: 8px;
+  height: 8px;
+}
+
 .panel-head-right {
   display: flex;
   flex-wrap: wrap;
@@ -1336,7 +1383,6 @@ body.chart-fs-open .admin-panel {
   }
 
   .chart-view-seg {
-    width: 100%;
     display: flex;
   }
 

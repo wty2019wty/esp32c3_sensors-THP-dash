@@ -148,34 +148,38 @@
               </div>
               <button type="button" class="btn" id="btn-fs-chart" title="全屏查看温湿度气压图表">全屏</button>
               <button type="button" class="btn ghost" id="btn-reset-zoom" title="恢复完整时间范围">重置缩放</button>
+            </div>
+          </header>
+          <div class="chart-stage">
+            <div class="chart-overlay" id="chart-overlay">
               <div class="legend" id="legend">
-                <button type="button" class="legend-item active" data-series="temperature" title="综合视图：左轴刻度 · °C">
+                <button type="button" class="legend-item active" data-series="temperature" title="综合视图：左内缘刻度 · °C">
                   <i style="background:var(--temp)"></i>温度
                 </button>
-                <button type="button" class="legend-item active" data-series="humidity" title="综合视图：右轴内侧刻度 · %RH">
+                <button type="button" class="legend-item active" data-series="humidity" title="综合视图：右内缘刻度 · %RH">
                   <i style="background:var(--humid)"></i>湿度
                 </button>
-                <button type="button" class="legend-item active" data-series="pressure" title="综合视图：右轴外侧刻度 · hPa">
+                <button type="button" class="legend-item active" data-series="pressure" title="综合视图：右内缘刻度（湿度下方）· hPa">
                   <i style="background:var(--press)"></i>气压
                 </button>
               </div>
             </div>
-          </header>
-          <div id="chart-combined" class="chart-host">
-            <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="滚轮/双指缩放，拖动平移；悬停查看数据"></canvas>
-          </div>
-          <div id="chart-split" class="chart-split hidden" hidden>
-            <div class="split-item">
-              <h3>温度 °C</h3>
-              <canvas id="canvas-t" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
+            <div id="chart-combined" class="chart-host">
+              <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="滚轮/双指缩放，拖动平移；悬停查看数据"></canvas>
             </div>
-            <div class="split-item">
-              <h3>湿度 %RH</h3>
-              <canvas id="canvas-h" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
-            </div>
-            <div class="split-item">
-              <h3>气压 hPa</h3>
-              <canvas id="canvas-p" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
+            <div id="chart-split" class="chart-split hidden" hidden>
+              <div class="split-item">
+                <h3>温度 °C</h3>
+                <canvas id="canvas-t" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
+              </div>
+              <div class="split-item">
+                <h3>湿度 %RH</h3>
+                <canvas id="canvas-h" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
+              </div>
+              <div class="split-item">
+                <h3>气压 hPa</h3>
+                <canvas id="canvas-p" width="1000" height="180" title="滚轮/双指缩放，拖动平移"></canvas>
+              </div>
             </div>
           </div>
           <div id="chart-readout" class="chart-readout">

@@ -77,13 +77,13 @@ function updateChartHelp() {
   if (!el) return;
   if (chartFs.open) {
     el.textContent = isCoarsePointer()
-      ? '双指缩放时间轴；横向拖动平移。点选查看数据；点「退出全屏」或 Esc 返回。综合视图三条曲线各自独立缩放，刻度颜色与曲线一致。'
-      : '滚轮/触控板缩放时间轴；放大后拖动平移。悬停查看数据；Esc 或点「退出全屏」返回。综合视图三条曲线各自独立缩放，刻度颜色与曲线一致。';
+      ? '双指缩放时间轴；横向拖动平移。点选查看数据；点「退出全屏」或 Esc 返回。综合视图三条曲线各自独立量程，刻度内嵌图中，颜色与曲线一致。'
+      : '滚轮/触控板缩放时间轴；放大后拖动平移。悬停查看数据；Esc 或点「退出全屏」返回。综合视图三条曲线各自独立量程，刻度内嵌图中，颜色与曲线一致。';
     return;
   }
   el.textContent = isCoarsePointer()
-    ? '双指缩放时间轴；横向拖动平移。点选曲线查看该时刻数据。综合视图三条曲线各自独立缩放（左刻度=温度，右刻度=湿度，右外列=气压，颜色对应曲线）。需要时点「重置缩放」恢复全程。'
-    : '滚轮/触控板缩放时间轴（可放大到采样点附近）；放大后拖动平移。悬停查看数据，点击固定。综合视图三条曲线各自独立缩放（左刻度=温度，右刻度=湿度，右外列=气压，颜色对应曲线）。点「重置缩放」恢复全程。';
+    ? '双指缩放时间轴；横向拖动平移。点选曲线查看该时刻数据。综合视图三条曲线独立量程，刻度直接标在图内（左内缘温度、右内缘湿度、气压错开在湿度下方）。需要时点「重置缩放」恢复全程。'
+    : '滚轮/触控板缩放时间轴（可放大到采样点附近）；放大后拖动平移。悬停查看数据，点击固定。综合视图三条曲线独立量程，刻度内嵌图中（左内缘温度、右内缘湿度、气压错开在湿度下方）。点「重置缩放」恢复全程。';
 }
 
 const state = {
@@ -840,8 +840,22 @@ function setChartView(view) {
   $$('[data-view]').forEach((b) => {
     b.classList.toggle('active', b.dataset.view === view);
   });
+  placeChartLegend(view);
   renderCharts();
   updateCursorUI();
+}
+
+/**
+ * 综合视图：图例叠在图表内部（不占图外一行高度）。
+ * 分项视图：每张小图自带标题，图例放回标题栏右侧，避免盖住第一张小图。
+ */
+function placeChartLegend(view) {
+  const legend = $('#legend');
+  const headRight = $('.panel-head-right');
+  const overlay = $('#chart-overlay');
+  if (!legend || !headRight || !overlay) return;
+  const target = view === 'split' ? headRight : overlay;
+  if (legend.parentElement !== target) target.appendChild(legend);
 }
 
 $$('.seg').forEach((btn) => {

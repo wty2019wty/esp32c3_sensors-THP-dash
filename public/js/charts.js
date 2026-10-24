@@ -167,31 +167,23 @@ function plotBox(width, height, kind) {
       plotH: Math.max(height - padT - padB, 30),
     };
   }
-  // 综合视图三条序列各自独立缩放：
-  // 左侧刻度列 = 温度；右内列 = 湿度；右外列 = 气压（各宽度档位都保留，窄屏也能读量程）。
-  // 留白只由宽度决定（不随数据/图例变化）——命中测试 plotInfo() 复用本函数，
-  // 若这里随数据动态收缩，点击/滚轮位置就会和实际绘制错位。
-  let padL, padR, padT, padB;
-  if (width < 400) {
-    padL = 38; padR = 90; padT = 10; padB = 26;
-  } else if (width < 640) {
-    padL = 42; padR = 92; padT = 12; padB = 30;
-  } else {
-    padL = 52; padR = 98; padT = 16; padB = 36;
-  }
+  // 综合视图：刻度内嵌在绘图区内部，四周只留极小边距，最大化绘图面积。
+  // 命中测试 plotInfo() 复用本函数，保证点击/滚轮位置与绘制一致。
+  const pad = 6;
   return {
-    padL,
-    padR,
-    padT,
-    padB,
-    plotW: Math.max(width - padL - padR, 40),
-    plotH: Math.max(height - padT - padB, 30),
+    padL: pad,
+    padR: pad,
+    padT: pad,
+    padB: pad,
+    plotW: Math.max(width - pad * 2, 40),
+    plotH: Math.max(height - pad * 2, 30),
   };
 }
 
 function xTickCount(width) {
-  if (width < 400) return 2;
-  if (width < 640) return 3;
+  if (width < 560) return 2;
+  if (width < 760) return 3;
+  if (width < 1000) return 4;
   return 5;
 }
 
@@ -441,53 +433,6 @@ export function drawCombined(canvas, points, opts = {}) {
     ctx.stroke();
   }
 
-  // 刻度文字与曲线同色：左列 = 温度，右内列 = 湿度，右外列 = 气压。
-  // 三列在所有宽度下都绘制（plotBox 已按最宽文本预留留白），不再窄屏省略。
-  const rightCols = [];
-  if (scales.humidity) rightCols.push({ key: 'humidity', scale: scales.humidity });
-  if (scales.pressure) rightCols.push({ key: 'pressure', scale: scales.pressure });
-  // 湿/气压两列间距：34px 可容纳 "100.0"，再留 8px 间隔给气压，避免两列文字贴合
-  const colW = width < 640 ? 34 : 38;
-  const labelAt = (text, x, y, align, color) => {
-    ctx.fillStyle = color;
-    ctx.textAlign = align;
-    ctx.fillText(text, x, y);
-  };
-
-  ctx.font = axisFont(width);
-  ctx.textBaseline = 'middle';
-  for (let i = 0; i <= gridLines; i++) {
-    const y = padT + (plotH * i) / gridLines;
-    if (scales.temperature) {
-      const s = scales.temperature;
-      const step = (s.max - s.min) / gridLines;
-      labelAt(formatTick(s.max - step * i, step), padL - 6, y, 'right', COLORS.temperature);
-    }
-    rightCols.forEach((col, ci) => {
-      const s = col.scale;
-      const step = (s.max - s.min) / gridLines;
-      labelAt(
-        formatTick(s.max - step * i, step),
-        padL + plotW + 6 + ci * colW,
-        y,
-        'left',
-        COLORS[col.key]
-      );
-    });
-  }
-
-  // labelAt 会改写 fillStyle，时间轴刻度必须复位成中性色，否则会被最后一个纵轴染色
-  ctx.fillStyle = COLORS.text;
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'top';
-  const xTicks = xTickCount(width);
-  for (let i = 0; i <= xTicks; i++) {
-    const ratio = i / xTicks;
-    const x = padL + plotW * ratio;
-    const ts = new Date(xMin + xSpan * ratio).toISOString();
-    ctx.fillText(xLabelForSpan(ts, xSpan), x, padT + plotH + 8);
-  }
-
   function drawSeries(key, bounds) {
     ctx.strokeStyle = COLORS[key];
     ctx.lineWidth = width < 400 ? 1.5 : 1.8;
@@ -523,6 +468,7 @@ export function drawCombined(canvas, points, opts = {}) {
   ctx.restore();
 
   ctx.strokeStyle = COLORS.grid;
+  ctx.lineWidth = 1;
   ctx.strokeRect(padL, padT, plotW, plotH);
 
   if (cursorIndex != null && cursorIndex >= 0 && cursorIndex < points.length) {
@@ -538,6 +484,88 @@ export function drawCombined(canvas, points, opts = {}) {
         }
       }
     }
+  }
+
+  // ---- 内嵌刻度：文字直接画在绘图区内部，不占图外空间 ----
+  // 左内缘 = 温度；右内缘 = 湿度；气压与湿度同一列，垂直错开半格（画在两条网格线之间）。
+  const bandL = width < 400 ? 34 : 44;
+  const bandR = width < 400 ? 38 : 48;
+  const axisXLeft = padL + bandL;
+  const axisXRight = padL + plotW - bandR + 6;
+
+  /** 带背景色描边的刻度文字：压在曲线上也看得清 */
+  function axisText(text, x, y, align, color, baseline = 'middle') {
+    ctx.font = axisFont(width);
+    ctx.textAlign = align;
+    ctx.textBaseline = baseline;
+    ctx.lineJoin = 'round';
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = COLORS.bg;
+    ctx.strokeText(text, x, y);
+    ctx.fillStyle = color;
+    ctx.fillText(text, x, y);
+  }
+
+  if (scales.temperature) {
+    const s = scales.temperature;
+    const step = (s.max - s.min) / gridLines;
+    for (let i = 0; i <= gridLines; i++) {
+      axisText(
+        formatTick(s.max - step * i, step),
+        axisXLeft,
+        padT + (plotH * i) / gridLines,
+        'right',
+        COLORS.temperature
+      );
+    }
+  }
+  if (scales.humidity) {
+    const s = scales.humidity;
+    const step = (s.max - s.min) / gridLines;
+    for (let i = 0; i <= gridLines; i++) {
+      axisText(
+        formatTick(s.max - step * i, step),
+        axisXRight,
+        padT + (plotH * i) / gridLines,
+        'left',
+        COLORS.humidity
+      );
+    }
+  }
+  if (scales.pressure) {
+    const s = scales.pressure;
+    const step = (s.max - s.min) / gridLines;
+    // 湿度刻度对齐网格线；气压刻度错开半格，落在湿度数字下方，省一列宽度
+    for (let i = 0; i < gridLines; i++) {
+      const ratio = (i + 0.5) / gridLines;
+      axisText(
+        formatTick(s.max - (s.max - s.min) * ratio, step),
+        axisXRight,
+        padT + plotH * ratio,
+        'left',
+        COLORS.pressure
+      );
+    }
+  }
+
+  // 时间轴同样内嵌在绘图区底部，左右避开刻度带
+  const xTicks = xTickCount(width);
+  const xTextMin = padL + bandL + 6;
+  const xTextMax = padL + plotW - bandR - 2;
+  for (let i = 0; i <= xTicks; i++) {
+    const ratio = i / xTicks;
+    const ts = new Date(xMin + xSpan * ratio).toISOString();
+    const label = xLabelForSpan(ts, xSpan);
+    let x = padL + plotW * ratio;
+    let align = 'center';
+    if (i === 0) {
+      x = xTextMin;
+      align = 'left';
+    } else if (i === xTicks) {
+      x = xTextMax;
+      align = 'right';
+    }
+    axisText(label, x, padT + plotH - 3, align, COLORS.text, 'bottom');
   }
 
   return {
