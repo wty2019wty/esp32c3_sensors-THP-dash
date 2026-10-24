@@ -307,6 +307,7 @@ npx wrangler d1 execute thp-dash --local --command "SELECT (SELECT COUNT(*) FROM
 | 现象 | 原因 | 处理 |
 |------|------|------|
 | `no such table: users` | 本地 D1 未建表 | `npm run db:local`；或 `POST /api/auth/migrate`；bootstrap 路径也会自动补建 |
+| 改了 `database_id` 后接口 500 / `no such table: sessions` | 本地 D1 按 `database_id` 分库存放，换 id 等于换了一个空库（浏览器残留旧 cookie 时 `/api/auth/me` 最先报错） | 重跑 `npm run db:local` 建表；想保留旧本地数据就把旧库文件复制到新 id 对应的 sqlite，或把 `database_id` 改回去 |
 | `Binding DB not found` / 配置错误 | `wrangler.jsonc` 未正确加载或未在项目根执行 | 在项目根运行 `npm run dev`；确认存在 `d1_databases` 且 `binding: "DB"` |
 | 端口被占用 | 8787 已被占用 | `npx wrangler dev --local --port 8788` |
 | 登录 401「用户名或密码错误」 | 未引导创建用户，或密码不对 | `GET /api/auth/bootstrap` 看 `needsBootstrap`；必要时清本地库后重建 admin |

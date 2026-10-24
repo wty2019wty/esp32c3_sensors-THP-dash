@@ -55,7 +55,12 @@ export async function destroySession(env, req) {
   const secret = cookies[SESSION_COOKIE];
   if (secret) {
     const secretHash = await hashSessionSecret(secret);
-    await env.DB.prepare(`DELETE FROM sessions WHERE secret_hash = ?`).bind(secretHash).run();
+    try {
+      await env.DB.prepare(`DELETE FROM sessions WHERE secret_hash = ?`).bind(secretHash).run();
+    } catch (err) {
+      // 全新本地库还没建表：没有会话可删，继续清 cookie 即可
+      if (!isMissingTableError(err)) throw err;
+    }
   }
   return [
     ['set-cookie', serializeCookie(SESSION_COOKIE, '', { maxAge: 0, httpOnly: true, secure: true, sameSite: 'Lax' })],
@@ -68,15 +73,26 @@ export async function resolveUserSession(env, req) {
   const secret = cookies[SESSION_COOKIE];
   if (!secret) return null;
   const secretHash = await hashSessionSecret(secret);
-  const row = await env.DB.prepare(
-    `SELECT s.id AS session_id, s.expires_at, s.csrf_hash, s.user_id,
-            u.username, u.role, u.disabled_at
-     FROM sessions s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.secret_hash = ?`
-  )
-    .bind(secretHash)
-    .first();
+  let row;
+  try {
+    row = await env.DB.prepare(
+      `SELECT s.id AS session_id, s.expires_at, s.csrf_hash, s.user_id,
+              u.username, u.role, u.disabled_at
+       FROM sessions s
+       JOIN users u ON u.id = s.user_id
+       WHERE s.secret_hash = ?`
+    )
+      .bind(secretHash)
+      .first();
+  } catch (err) {
+    /*
+     * 本地/全新 D1 尚未建表（改 database_id、删 .wrangler 后都会出现）：
+     * 浏览器里残留旧 cookie 时 /api/auth/me 会走到这里。按"未登录"处理，
+     * 让前端继续走 /api/auth/bootstrap 自动建表，而不是返回 500。
+     */
+    if (isMissingTableError(err)) return null;
+    throw err;
+  }
   if (!row) return null;
   if (row.disabled_at) return null;
   if (Date.parse(row.expires_at) <= Date.now()) {
