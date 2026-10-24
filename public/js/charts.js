@@ -97,10 +97,23 @@ function niceBounds(min, max, padRatio = 0.08) {
   return { min: min - pad, max: max + pad };
 }
 
-function formatTick(v) {
-  if (Math.abs(v) >= 1000) return v.toFixed(0);
-  if (Math.abs(v) >= 100) return v.toFixed(1);
-  return v.toFixed(1).replace(/\.0$/, '');
+/**
+ * 刻度文本：小数位随刻度步长自适应（最多 2 位），避免深度放大后多个刻度被
+ * 四舍五入成同一串数字；顺带把 "-0" 归一成 "0"。
+ * @param {number} v 刻度值
+ * @param {number} [step] 相邻刻度间隔；省略时按数值量级回落
+ */
+function formatTick(v, step) {
+  if (!Number.isFinite(v)) return '';
+  const auto = !(step > 0);
+  const d = auto
+    ? (Math.abs(v) >= 1 ? 1 : 2)
+    : Math.min(2, Math.max(0, -Math.floor(Math.log10(step))));
+  // 按步长固定小数位（同一根轴位数一致）；同时把 "-0.0" 之类的负零归一成 0
+  const safe = Math.abs(v) < 10 ** -d / 2 ? 0 : v;
+  let s = safe.toFixed(d);
+  if (auto && s.includes('.')) s = s.replace(/\.?0+$/, '');
+  return s;
 }
 
 export function formatTs(ts) {
@@ -155,14 +168,16 @@ function plotBox(width, height, kind) {
     };
   }
   // 综合视图三条序列各自独立缩放：
-  // 左侧刻度列 = 温度；右侧刻度列 = 湿度；右侧外列 = 气压（宽屏才有）
+  // 左侧刻度列 = 温度；右内列 = 湿度；右外列 = 气压（各宽度档位都保留，窄屏也能读量程）。
+  // 留白只由宽度决定（不随数据/图例变化）——命中测试 plotInfo() 复用本函数，
+  // 若这里随数据动态收缩，点击/滚轮位置就会和实际绘制错位。
   let padL, padR, padT, padB;
   if (width < 400) {
-    padL = 36; padR = 52; padT = 10; padB = 26;
+    padL = 38; padR = 90; padT = 10; padB = 26;
   } else if (width < 640) {
-    padL = 42; padR = 56; padT = 12; padB = 30;
+    padL = 42; padR = 92; padT = 12; padB = 30;
   } else {
-    padL = 52; padR = 96; padT = 16; padB = 36;
+    padL = 52; padR = 98; padT = 16; padB = 36;
   }
   return {
     padL,
@@ -426,13 +441,13 @@ export function drawCombined(canvas, points, opts = {}) {
     ctx.stroke();
   }
 
-  // 刻度文字与曲线同色：左列 = 温度，右列 = 湿度，右外列 = 气压
+  // 刻度文字与曲线同色：左列 = 温度，右内列 = 湿度，右外列 = 气压。
+  // 三列在所有宽度下都绘制（plotBox 已按最宽文本预留留白），不再窄屏省略。
   const rightCols = [];
   if (scales.humidity) rightCols.push({ key: 'humidity', scale: scales.humidity });
-  if (scales.pressure && (width >= 640 || !scales.humidity)) {
-    rightCols.push({ key: 'pressure', scale: scales.pressure });
-  }
-  const colW = width < 400 ? 26 : 30;
+  if (scales.pressure) rightCols.push({ key: 'pressure', scale: scales.pressure });
+  // 湿/气压两列间距：34px 可容纳 "100.0"，再留 8px 间隔给气压，避免两列文字贴合
+  const colW = width < 640 ? 34 : 38;
   const labelAt = (text, x, y, align, color) => {
     ctx.fillStyle = color;
     ctx.textAlign = align;
@@ -445,18 +460,14 @@ export function drawCombined(canvas, points, opts = {}) {
     const y = padT + (plotH * i) / gridLines;
     if (scales.temperature) {
       const s = scales.temperature;
-      labelAt(
-        formatTick(s.max - ((s.max - s.min) * i) / gridLines),
-        padL - 6,
-        y,
-        'right',
-        COLORS.temperature
-      );
+      const step = (s.max - s.min) / gridLines;
+      labelAt(formatTick(s.max - step * i, step), padL - 6, y, 'right', COLORS.temperature);
     }
     rightCols.forEach((col, ci) => {
       const s = col.scale;
+      const step = (s.max - s.min) / gridLines;
       labelAt(
-        formatTick(s.max - ((s.max - s.min) * i) / gridLines),
+        formatTick(s.max - step * i, step),
         padL + plotW + 6 + ci * colW,
         y,
         'left',
@@ -465,6 +476,8 @@ export function drawCombined(canvas, points, opts = {}) {
     });
   }
 
+  // labelAt 会改写 fillStyle，时间轴刻度必须复位成中性色，否则会被最后一个纵轴染色
+  ctx.fillStyle = COLORS.text;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   const xTicks = xTickCount(width);
@@ -532,8 +545,11 @@ export function drawCombined(canvas, points, opts = {}) {
     xMax,
     xSpan,
     box,
-    left: scales.temperature || scales.humidity || scales.pressure,
-    right: scales.pressure || scales.humidity,
+    // 纵轴归属（旧字段保留）：left=左列（温度），right=右内列（湿度），pressure=右外列（气压）。
+    // 三条序列量程互相独立，不要把某个值套到别的轴上。
+    left: scales.temperature || null,
+    right: scales.humidity || null,
+    pressure: scales.pressure || null,
     scales,
     kind: 'combined',
     dataMin,
@@ -572,18 +588,19 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
   ctx.strokeStyle = COLORS.grid;
   ctx.lineWidth = 1;
   const gridLines = 3;
+  const tickStep = (bounds.max - bounds.min) / gridLines;
   for (let i = 0; i <= gridLines; i++) {
     const y = padT + (plotH * i) / gridLines;
     ctx.beginPath();
     ctx.moveTo(padL, y);
     ctx.lineTo(padL + plotW, y);
     ctx.stroke();
-    const lv = bounds.max - ((bounds.max - bounds.min) * i) / gridLines;
+    const lv = bounds.max - tickStep * i;
     ctx.fillStyle = COLORS.text;
     ctx.font = axisFont(width);
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText(formatTick(lv), padL - 4, y);
+    ctx.fillText(formatTick(lv, tickStep), padL - 4, y);
   }
 
   clipPlot(ctx, box);

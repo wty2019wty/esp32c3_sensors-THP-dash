@@ -192,7 +192,8 @@
           </div>
           <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
           <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
-          <p class="chart-help" id="chart-help">滚轮/双指缩放时间轴；放大后拖动平移。综合视图三条曲线各自独立缩放（左刻度=温度，右刻度=湿度/气压，颜色对应曲线），点「重置缩放」恢复全程。</p>
+          <!-- 帮助文案统一由 app.js 的 updateChartHelp() 生成（按指针类型/全屏状态切换），此处不再维护静态副本 -->
+          <p class="chart-help" id="chart-help"></p>
         </section>
 
       </main>
