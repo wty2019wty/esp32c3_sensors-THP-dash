@@ -76,7 +76,7 @@ ESP32/
 │   ├── thp_local.c/h            # I2C 本机采样（SHT40/BMP280，中值+热修复）
 │   ├── thp_ble.c/h              # 多设备 BLE 网关编排
 │   ├── thp_wifi.c/h / thp_time.c/h / thp_queue.c/h / thp_report.c/h
-│   └── thp_tls_trust.h / i2c_config.h
+│   └── thp_tls_trust.c/h / i2c_config.h
 └── components/
     ├── sht40/ bmp280/           # 驱动
     └── atc_ble/                 # 多设备 ATC/BTHome 扫描解析
@@ -135,10 +135,10 @@ copy main\thp_config.h.example main\thp_config.h
 | 模式 | 值 | 何时用 |
 | --- | --- | --- |
 | BUNDLE | 0 | 系统证书包，覆盖公有 CA |
-| PINNED | 1 | **当前推荐**（TrustAsia→DigiCert G2）。bundle 报 `No matching trusted root` 或握手 `-0x7200` 时用；信任 `thp_tls_trust.h` 内嵌根 |
+| PINNED | 1 | **当前推荐**（TrustAsia→DigiCert G2）。bundle 报 `No matching trusted root` 或握手 `-0x7200` 时用；信任 `thp_tls_trust.c` 内嵌根 |
 | NONE | 2 | **仅调试**。需 sdkconfig 开 `CONFIG_ESP_TLS_INSECURE` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY` |
 
-兼容旧宏 `THP_HTTP_SKIP_VERIFY=1` ≡ `TRUST_NONE` 已移除，请直接设 `THP_TLS_TRUST 2`。换域名/换 CA 时更新 `thp_tls_trust.h` 内嵌 PEM。
+兼容旧宏 `THP_HTTP_SKIP_VERIFY=1` ≡ `TRUST_NONE` 已移除，请直接设 `THP_TLS_TRUST 2`。换域名/换 CA 时更新 `thp_tls_trust.c` 内嵌 PEM。
 默认 `CONFIG_LWIP_IPV6=n`，规避 Cloudflare AAAA 连不通。
 
 ## 调度（窗内零 HTTP/NTP）

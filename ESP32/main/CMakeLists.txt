@@ -9,6 +9,7 @@ idf_component_register(
         "thp_report.c"
         "thp_ble.c"
         "thp_sched.c"
+        "thp_tls_trust.c"
     INCLUDE_DIRS
         "."
     REQUIRES
