@@ -76,10 +76,9 @@ typedef struct {
 #define THP_NTP_SYNC_TIMEOUT_MS     20000
 
 /* TLS 信任：0=证书包（默认） 1=内嵌根 2=不校验（调试）
- * 详见 thp_tls_trust.h。THP_HTTP_SKIP_VERIFY 保留兼容，等价于 TRUST_NONE。
+ * 详见 thp_tls_trust.h。不校验请直接写 2（旧宏 THP_HTTP_SKIP_VERIFY 已移除）。
  */
 #define THP_TLS_TRUST           0
-#define THP_HTTP_SKIP_VERIFY    0
 
 /* ---------------- BLE 窗口 ---------------- */
 #define THP_BLE_SCAN_OPEN_BEFORE_MS   5000

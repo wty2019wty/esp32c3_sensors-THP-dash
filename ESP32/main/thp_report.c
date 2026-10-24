@@ -25,12 +25,6 @@
 #include "thp_types.h"
 #include "thp_wifi.h"
 
-/* 兼容旧宏：THP_HTTP_SKIP_VERIFY=1 等价于 TRUST_NONE（不校验） */
-#if defined(THP_HTTP_SKIP_VERIFY) && THP_HTTP_SKIP_VERIFY
-#undef THP_TLS_TRUST
-#define THP_TLS_TRUST THP_TLS_TRUST_NONE
-#endif
-
 static const char *TAG = "thp.report";
 
 #ifndef THP_HTTP_TIMEOUT_MS
