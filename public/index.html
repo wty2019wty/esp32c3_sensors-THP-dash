@@ -148,10 +148,6 @@
               </div>
               <button type="button" class="btn" id="btn-fs-chart" title="全屏查看温湿度气压图表">全屏</button>
               <button type="button" class="btn ghost" id="btn-reset-zoom" title="恢复完整时间范围">重置缩放</button>
-            </div>
-          </header>
-          <div class="chart-stage">
-            <div class="chart-overlay" id="chart-overlay">
               <div class="legend" id="legend">
                 <button type="button" class="legend-item active" data-series="temperature" title="综合视图：左内缘刻度 · °C">
                   <i style="background:var(--temp)"></i>温度
@@ -164,6 +160,8 @@
                 </button>
               </div>
             </div>
+          </header>
+          <div class="chart-stage">
             <div id="chart-combined" class="chart-host">
               <canvas id="canvas-combined" width="1000" height="360" aria-label="综合曲线图" title="滚轮/双指缩放，拖动平移；悬停查看数据"></canvas>
             </div>

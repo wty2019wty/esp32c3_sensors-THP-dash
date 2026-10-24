@@ -840,22 +840,8 @@ function setChartView(view) {
   $$('[data-view]').forEach((b) => {
     b.classList.toggle('active', b.dataset.view === view);
   });
-  placeChartLegend(view);
   renderCharts();
   updateCursorUI();
-}
-
-/**
- * 综合视图：图例叠在图表内部（不占图外一行高度）。
- * 分项视图：每张小图自带标题，图例放回标题栏右侧，避免盖住第一张小图。
- */
-function placeChartLegend(view) {
-  const legend = $('#legend');
-  const headRight = $('.panel-head-right');
-  const overlay = $('#chart-overlay');
-  if (!legend || !headRight || !overlay) return;
-  const target = view === 'split' ? headRight : overlay;
-  if (legend.parentElement !== target) target.appendChild(legend);
 }
 
 $$('.seg').forEach((btn) => {
