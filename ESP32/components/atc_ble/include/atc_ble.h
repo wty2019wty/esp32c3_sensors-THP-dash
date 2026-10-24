@@ -45,6 +45,12 @@ bool atc_ble_pop_window_best(size_t dev_index, int64_t ref_ms, atc_ble_sample_t 
 
 esp_err_t atc_ble_stop_scan(void);
 esp_err_t atc_ble_resume_scan_if_wanted(void);
+
+/**
+ * 测试：强制保持扫描（窗口关/过期不停扫）；HTTP stop 期间仍暂停，结束后 resume。
+ * 关闭时若无活动窗口会立即停扫，恢复窗口模型；init 之前调用仅记标志，不会立刻起扫。
+ */
+void atc_ble_set_hold_scan(bool enable);
 bool      atc_ble_pop_latest(size_t dev_index, atc_ble_sample_t *out);
 void      atc_ble_clear_cache(void);
 bool      atc_ble_is_scanning(void);

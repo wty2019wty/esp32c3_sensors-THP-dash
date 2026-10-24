@@ -59,6 +59,7 @@ static volatile bool s_scanning;
 static volatile bool s_inited;
 static volatile bool s_synced;
 static volatile bool s_scan_wanted;
+static volatile bool s_hold_scan;
 static bool s_scan_announced;
 static uint8_t s_own_addr_type;
 static SemaphoreHandle_t s_scan_mtx;
@@ -664,8 +665,10 @@ static void window_expire_if_due(void)
     portENTER_CRITICAL(&s_lock);
     s_window_active = false;
     portEXIT_CRITICAL(&s_lock);
-    s_scan_wanted = false;
-    stop_scan_locked();
+    if (!s_hold_scan) {
+        s_scan_wanted = false;
+        stop_scan_locked();
+    }
     scan_unlock();
 }
 
@@ -831,10 +834,12 @@ void atc_ble_window_close(void)
     portENTER_CRITICAL(&s_lock);
     s_window_active = false;
     portEXIT_CRITICAL(&s_lock);
-    s_scan_wanted = false;
-    stop_scan_locked();
+    if (!s_hold_scan) {
+        s_scan_wanted = false;
+        stop_scan_locked();
+    }
     scan_unlock();
-    ESP_LOGD(TAG, "ATC BLE 窗口关闭，扫描暂停");
+    ESP_LOGD(TAG, "ATC BLE 窗口关闭，扫描%s", s_hold_scan ? "保持(hold)" : "暂停");
 }
 
 bool atc_ble_pop_window_best(size_t dev_index, int64_t ref_ms, atc_ble_sample_t *out)
@@ -896,7 +901,7 @@ esp_err_t atc_ble_resume_scan_if_wanted(void)
         return ESP_OK;
     }
     scan_lock();
-    if (!s_window_active) {
+    if (!s_window_active && !s_hold_scan) {
         scan_unlock();
         return ESP_OK;
     }
@@ -905,8 +910,15 @@ esp_err_t atc_ble_resume_scan_if_wanted(void)
         portENTER_CRITICAL(&s_lock);
         s_window_active = false;
         portEXIT_CRITICAL(&s_lock);
-        s_scan_wanted = false;
-        stop_scan_locked();
+        if (!s_hold_scan) {
+            s_scan_wanted = false;
+            stop_scan_locked();
+        } else {
+            s_scan_wanted = true;
+            if (s_synced) {
+                start_scan_locked();
+            }
+        }
         scan_unlock();
         return ESP_OK;
     }
@@ -946,6 +958,34 @@ bool atc_ble_is_scanning(void)
     bool v = s_scanning;
     portEXIT_CRITICAL(&s_lock);
     return v;
+}
+
+void atc_ble_set_hold_scan(bool enable)
+{
+    if (!s_inited) {
+        /* init 之前仅记标志；init 后需再次调用才会立刻起扫 */
+        s_hold_scan = enable;
+        return;
+    }
+    scan_lock();
+    s_hold_scan = enable;
+    if (enable) {
+        s_scan_wanted = true;
+        if (s_synced) {
+            start_scan_locked();
+        }
+        scan_unlock();
+        ESP_LOGI(TAG, "hold_scan 开启，持续扫描（测 RSSI）");
+        return;
+    }
+    /* 关闭 hold：无活动窗口则停扫收束回窗口模型；有窗口则交还窗口策略 */
+    const bool win = s_window_active;
+    if (!win) {
+        s_scan_wanted = false;
+        stop_scan_locked();
+    }
+    scan_unlock();
+    ESP_LOGI(TAG, "hold_scan 关闭（window=%d）", (int)win);
 }
 
 bool atc_ble_window_is_open(void)
