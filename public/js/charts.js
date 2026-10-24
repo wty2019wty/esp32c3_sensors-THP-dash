@@ -100,7 +100,7 @@ function niceBounds(min, max, padRatio = 0.08) {
 function formatTick(v) {
   if (Math.abs(v) >= 1000) return v.toFixed(0);
   if (Math.abs(v) >= 100) return v.toFixed(1);
-  return v.toFixed(2).replace(/\.?0+$/, '');
+  return v.toFixed(1).replace(/\.0$/, '');
 }
 
 export function formatTs(ts) {
@@ -154,13 +154,15 @@ function plotBox(width, height, kind) {
       plotH: Math.max(height - padT - padB, 30),
     };
   }
+  // 综合视图三条序列各自独立缩放：
+  // 左侧刻度列 = 温度；右侧刻度列 = 湿度；右侧外列 = 气压（宽屏才有）
   let padL, padR, padT, padB;
   if (width < 400) {
-    padL = 34; padR = 34; padT = 10; padB = 26;
+    padL = 36; padR = 52; padT = 10; padB = 26;
   } else if (width < 640) {
-    padL = 40; padR = 42; padT = 12; padB = 30;
+    padL = 42; padR = 56; padT = 12; padB = 30;
   } else {
-    padL = 52; padR = 56; padT = 16; padB = 36;
+    padL = 52; padR = 96; padT = 16; padB = 36;
   }
   return {
     padL,
@@ -399,12 +401,19 @@ export function drawCombined(canvas, points, opts = {}) {
   const xSpan = xMax - xMin || 1;
 
   const vis = pointsInWindow(points, xWindow || null);
-  const tVals = vis.map((p) => p.temperature).filter(Number.isFinite);
-  const hVals = vis.map((p) => p.humidity).filter(Number.isFinite);
-  const pVals = vis.map((p) => p.pressure).filter(Number.isFinite);
-  const leftVals = [...tVals, ...hVals];
-  const left = niceBounds(Math.min(...leftVals), Math.max(...leftVals));
-  const right = niceBounds(Math.min(...pVals), Math.max(...pVals));
+  /** 单条序列在窗口内的独立量程（温度与湿度不再共用一根轴） */
+  const scaleOf = (key) => {
+    const vals = vis.map((p) => p[key]).filter(Number.isFinite);
+    return vals.length ? niceBounds(Math.min(...vals), Math.max(...vals)) : null;
+  };
+  const showT = seriesList.includes('temperature');
+  const showH = seriesList.includes('humidity');
+  const showP = seriesList.includes('pressure');
+  const scales = {
+    temperature: showT ? scaleOf('temperature') : null,
+    humidity: showH ? scaleOf('humidity') : null,
+    pressure: showP ? scaleOf('pressure') : null,
+  };
 
   ctx.strokeStyle = COLORS.grid;
   ctx.lineWidth = 1;
@@ -417,18 +426,43 @@ export function drawCombined(canvas, points, opts = {}) {
     ctx.stroke();
   }
 
-  ctx.fillStyle = COLORS.text;
+  // 刻度文字与曲线同色：左列 = 温度，右列 = 湿度，右外列 = 气压
+  const rightCols = [];
+  if (scales.humidity) rightCols.push({ key: 'humidity', scale: scales.humidity });
+  if (scales.pressure && (width >= 640 || !scales.humidity)) {
+    rightCols.push({ key: 'pressure', scale: scales.pressure });
+  }
+  const colW = width < 400 ? 26 : 30;
+  const labelAt = (text, x, y, align, color) => {
+    ctx.fillStyle = color;
+    ctx.textAlign = align;
+    ctx.fillText(text, x, y);
+  };
+
   ctx.font = axisFont(width);
-  ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
   for (let i = 0; i <= gridLines; i++) {
     const y = padT + (plotH * i) / gridLines;
-    const lv = left.max - ((left.max - left.min) * i) / gridLines;
-    const rv = right.max - ((right.max - right.min) * i) / gridLines;
-    ctx.fillText(formatTick(lv), padL - 6, y);
-    ctx.textAlign = 'left';
-    ctx.fillText(formatTick(rv), padL + plotW + 6, y);
-    ctx.textAlign = 'right';
+    if (scales.temperature) {
+      const s = scales.temperature;
+      labelAt(
+        formatTick(s.max - ((s.max - s.min) * i) / gridLines),
+        padL - 6,
+        y,
+        'right',
+        COLORS.temperature
+      );
+    }
+    rightCols.forEach((col, ci) => {
+      const s = col.scale;
+      labelAt(
+        formatTick(s.max - ((s.max - s.min) * i) / gridLines),
+        padL + plotW + 6 + ci * colW,
+        y,
+        'left',
+        COLORS[col.key]
+      );
+    });
   }
 
   ctx.textAlign = 'center';
@@ -470,9 +504,9 @@ export function drawCombined(canvas, points, opts = {}) {
   }
 
   clipPlot(ctx, box);
-  if (seriesList.includes('temperature')) drawSeries('temperature', left);
-  if (seriesList.includes('humidity')) drawSeries('humidity', left);
-  if (seriesList.includes('pressure')) drawSeries('pressure', right);
+  if (scales.temperature) drawSeries('temperature', scales.temperature);
+  if (scales.humidity) drawSeries('humidity', scales.humidity);
+  if (scales.pressure) drawSeries('pressure', scales.pressure);
   ctx.restore();
 
   ctx.strokeStyle = COLORS.grid;
@@ -484,19 +518,27 @@ export function drawCombined(canvas, points, opts = {}) {
     if (t >= xMin && t <= xMax) {
       const x = xOf(t, xMin, xSpan, padL, plotW);
       drawCrosshair(ctx, x, box);
-      if (seriesList.includes('temperature') && Number.isFinite(p.temperature)) {
-        drawDot(ctx, x, yOf(p.temperature, left, padT, plotH), COLORS.temperature);
-      }
-      if (seriesList.includes('humidity') && Number.isFinite(p.humidity)) {
-        drawDot(ctx, x, yOf(p.humidity, left, padT, plotH), COLORS.humidity);
-      }
-      if (seriesList.includes('pressure') && Number.isFinite(p.pressure)) {
-        drawDot(ctx, x, yOf(p.pressure, right, padT, plotH), COLORS.pressure);
+      for (const key of ['temperature', 'humidity', 'pressure']) {
+        const s = scales[key];
+        if (s && Number.isFinite(p[key])) {
+          drawDot(ctx, x, yOf(p[key], s, padT, plotH), COLORS[key]);
+        }
       }
     }
   }
 
-  return { xMin, xMax, xSpan, box, left, right, kind: 'combined', dataMin, dataMax };
+  return {
+    xMin,
+    xMax,
+    xSpan,
+    box,
+    left: scales.temperature || scales.humidity || scales.pressure,
+    right: scales.pressure || scales.humidity,
+    scales,
+    kind: 'combined',
+    dataMin,
+    dataMax,
+  };
 }
 
 export function drawSeriesChart(canvas, points, key, opts = {}) {

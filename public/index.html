@@ -149,13 +149,13 @@
               <button type="button" class="btn" id="btn-fs-chart" title="全屏查看温湿度气压图表">全屏</button>
               <button type="button" class="btn ghost" id="btn-reset-zoom" title="恢复完整时间范围">重置缩放</button>
               <div class="legend" id="legend">
-                <button type="button" class="legend-item active" data-series="temperature">
+                <button type="button" class="legend-item active" data-series="temperature" title="综合视图：左轴刻度 · °C">
                   <i style="background:var(--temp)"></i>温度
                 </button>
-                <button type="button" class="legend-item active" data-series="humidity">
+                <button type="button" class="legend-item active" data-series="humidity" title="综合视图：右轴内侧刻度 · %RH">
                   <i style="background:var(--humid)"></i>湿度
                 </button>
-                <button type="button" class="legend-item active" data-series="pressure">
+                <button type="button" class="legend-item active" data-series="pressure" title="综合视图：右轴外侧刻度 · hPa">
                   <i style="background:var(--press)"></i>气压
                 </button>
               </div>
@@ -192,7 +192,7 @@
           </div>
           <div id="chart-tooltip" class="chart-tooltip" role="tooltip" hidden></div>
           <p class="empty-state" id="chart-empty" hidden>当前范围内没有数据。选择其他设备或时间范围，或等待设备上报。</p>
-          <p class="chart-help" id="chart-help">滚轮/双指缩放时间轴；放大后拖动平移。点「重置缩放」恢复全程。</p>
+          <p class="chart-help" id="chart-help">滚轮/双指缩放时间轴；放大后拖动平移。综合视图三条曲线各自独立缩放（左刻度=温度，右刻度=湿度/气压，颜色对应曲线），点「重置缩放」恢复全程。</p>
         </section>
 
       </main>
