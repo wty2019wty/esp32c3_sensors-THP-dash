@@ -1,6 +1,13 @@
 /** Local demo data when Worker API is not reachable (preview only). */
 
 const KEY = 'thp_demo_v1';
+const STEP_MS = 5 * 60 * 1000; // 演示数据采样间隔：与真实设备一致，5 分钟
+const WINDOW_POINTS = 288; // 生成 24 小时的数据窗口
+
+/** 对齐到采样网格，避免“未来点”被 to 上界过滤掉 */
+function gridNow() {
+  return Math.floor(Date.now() / STEP_MS) * STEP_MS;
+}
 
 function pad(n) {
   return String(n).padStart(2, '0');
@@ -10,14 +17,11 @@ function iso(d) {
   return d.toISOString();
 }
 
-function seed() {
-  const devices = [
-    { id: 'dev_demo1', name: '演示设备一号', status: 'active', createdAt: iso(new Date(Date.now() - 86400000)), lastSeenAt: iso(new Date()), activeTokens: 1 },
-  ];
+function seedPoints() {
   const points = [];
-  const now = Date.now();
-  for (let i = 288; i >= 0; i--) {
-    const ts = new Date(now - i * 5 * 60 * 1000);
+  const now = gridNow();
+  for (let i = WINDOW_POINTS; i >= 0; i--) {
+    const ts = new Date(now - i * STEP_MS);
     const t = 22 + Math.sin(i / 18) * 2.5 + (Math.random() - 0.5) * 0.3;
     const h = 55 + Math.cos(i / 22) * 8 + (Math.random() - 0.5) * 1.2;
     const p = 1012 + Math.sin(i / 40) * 4 + (Math.random() - 0.5) * 0.4;
@@ -28,6 +32,13 @@ function seed() {
       pressure: Math.round(p * 10) / 10,
     });
   }
+  return points;
+}
+
+function seed() {
+  const devices = [
+    { id: 'dev_demo1', name: '演示设备一号', status: 'active', createdAt: iso(new Date(Date.now() - 86400000)), lastSeenAt: iso(new Date(gridNow())), activeTokens: 1 },
+  ];
   return {
     user: { id: 'usr_demo', username: 'demo', role: 'admin' },
     devices,
@@ -43,24 +54,60 @@ function seed() {
         status: 'active',
       },
     ],
-    points,
+    points: seedPoints(),
   };
 }
 
+/**
+ * 演示数据不能“过期”：缓存里的点若已落后于当前时间，就整体平移时间轴，
+ * 让最后一个采样点对齐到现在；否则默认范围（当天 / 近 24 小时）会查不到数据。
+ */
+function freshen(db) {
+  const points = Array.isArray(db.points) ? db.points : [];
+  if (!points.length) return { db: { ...db, points: seedPoints() }, changed: true };
+
+  const times = points.map((p) => Date.parse(p.ts));
+  if (times.some((t) => !Number.isFinite(t))) {
+    return { db: { ...db, points: seedPoints() }, changed: true };
+  }
+
+  const drift = gridNow() - times[times.length - 1];
+  if (drift === 0) return { db, changed: false };
+
+  const shifted = points.map((p, i) => ({ ...p, ts: new Date(times[i] + drift).toISOString() }));
+  const lastSeenAt = shifted[shifted.length - 1].ts;
+  const devices = (Array.isArray(db.devices) ? db.devices : []).map((d) => ({ ...d, lastSeenAt }));
+  return { db: { ...db, points: shifted, devices }, changed: true };
+}
+
 function load() {
+  let db = null;
   try {
     const raw = localStorage.getItem(KEY);
-    if (raw) return JSON.parse(raw);
+    if (raw) db = JSON.parse(raw);
   } catch {
     /* ignore */
   }
-  const s = seed();
-  try {
-    localStorage.setItem(KEY, JSON.stringify(s));
-  } catch {
-    /* ignore */
+
+  let changed = true;
+  if (!db || typeof db !== 'object') {
+    db = seed();
+  } else {
+    const res = freshen(db);
+    db = res.db;
+    changed = res.changed;
+    if (!Array.isArray(db.devices)) db.devices = [];
+    if (!Array.isArray(db.tokens)) db.tokens = [];
   }
-  return s;
+
+  if (changed) {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(db));
+    } catch {
+      /* ignore */
+    }
+  }
+  return db;
 }
 
 export function demoUser() {
