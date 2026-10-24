@@ -17,16 +17,27 @@
  */
 #pragma once
 
+/* 信任模式的唯一真相源在 thp_config.h。这里主动包含，避免依赖调用方的 include 顺序
+ * （本头文件需要 THP_TLS_TRUST 才能决定是否声明内嵌 PEM）。 */
+#include "thp_config.h"
+
 #define THP_TLS_TRUST_BUNDLE 0
 #define THP_TLS_TRUST_PINNED 1
 #define THP_TLS_TRUST_NONE   2
 
 /*
- * 信任模式由 thp_config.h 单独定义（唯一真相源），此处不再提供兜底默认值：
+ * 信任模式由 thp_config.h 单独定义，此处不再提供兜底默认值：
  * 写漏时直接编译失败，避免不同 include 顺序静默得到不同的 TLS 模式。
  */
 #ifndef THP_TLS_TRUST
 #error "未定义 THP_TLS_TRUST：请在 thp_config.h 中设为 0(BUNDLE) / 1(PINNED) / 2(NONE)"
+#endif
+
+/* 旧宏 THP_HTTP_SKIP_VERIFY=1（原等价于 TRUST_NONE）已移除。
+ * 若静默忽略，设备会从"不校验"退回 BUNDLE 并重新出现握手失败，因此直接报错；
+ * 旧模板里保留的 #define THP_HTTP_SKIP_VERIFY 0 不受影响。 */
+#if defined(THP_HTTP_SKIP_VERIFY) && THP_HTTP_SKIP_VERIFY
+#error "THP_HTTP_SKIP_VERIFY 已移除：请在 thp_config.h 设 THP_TLS_TRUST 2（仅调试）"
 #endif
 
 /*
@@ -36,4 +47,6 @@
  *
  * 实体定义在 thp_tls_trust.c，仅 PINNED 模式参与编译（BUNDLE/NONE 下不占 flash）。
  */
+#if THP_TLS_TRUST == THP_TLS_TRUST_PINNED
 extern const char THP_TLS_ROOT_PEM[];
+#endif

@@ -138,7 +138,7 @@ copy main\thp_config.h.example main\thp_config.h
 | PINNED | 1 | **当前推荐**（TrustAsia→DigiCert G2）。bundle 报 `No matching trusted root` 或握手 `-0x7200` 时用；信任 `thp_tls_trust.c` 内嵌根 |
 | NONE | 2 | **仅调试**。需 sdkconfig 开 `CONFIG_ESP_TLS_INSECURE` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY` |
 
-兼容旧宏 `THP_HTTP_SKIP_VERIFY=1` ≡ `TRUST_NONE` 已移除，请直接设 `THP_TLS_TRUST 2`。换域名/换 CA 时更新 `thp_tls_trust.c` 内嵌 PEM。
+旧宏 `THP_HTTP_SKIP_VERIFY=1`（原等价于 `TRUST_NONE`）已移除；仍写 `1` 会在编译期报错，请改设 `THP_TLS_TRUST 2`（仅调试）。换域名/换 CA 时更新 `thp_tls_trust.c` 内嵌 PEM。
 默认 `CONFIG_LWIP_IPV6=n`，规避 Cloudflare AAAA 连不通。
 
 ## 调度（窗内零 HTTP/NTP）

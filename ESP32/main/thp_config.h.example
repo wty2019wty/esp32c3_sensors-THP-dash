@@ -75,8 +75,11 @@ typedef struct {
     "pool.ntp.org")
 #define THP_NTP_SYNC_TIMEOUT_MS     20000
 
-/* TLS 信任：0=证书包（默认） 1=内嵌根 2=不校验（调试）
- * 详见 thp_tls_trust.h。不校验请直接写 2（旧宏 THP_HTTP_SKIP_VERIFY 已移除）。
+/* TLS 信任：0=证书包（默认，覆盖公有 CA） 1=内嵌根（PINNED） 2=不校验（仅调试）
+ * 详见 thp_tls_trust.h。本项必须显式定义，写漏会编译失败。
+ * 0 是通用默认；本项目上报域名走 TrustAsia→DigiCert G2，bundle 报
+ * "No matching trusted root" 或握手 -0x7200 时改成 1。
+ * 不校验请直接写 2（旧宏 THP_HTTP_SKIP_VERIFY 已移除，仍写 1 会编译报错）。
  */
 #define THP_TLS_TRUST           0
 

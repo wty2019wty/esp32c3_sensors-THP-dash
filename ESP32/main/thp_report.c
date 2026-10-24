@@ -343,7 +343,7 @@ static thp_http_result_t report_once(const thp_reading_t *r, bool backfill,
     /*
      * TLS 信任：esp_http_client 中 crt_bundle_attach 优先于 cert_pem。
      * - BUNDLE：只用系统证书包（覆盖公有 CA，含 GTS/LE/DigiCert）
-     * - PINNED ：只用 thp_tls_trust.h 内嵌多根 PEM（bundle 对 GTS 匹配失败时）
+     * - PINNED ：只用 thp_tls_trust.c 内嵌多根 PEM（bundle 对 GTS 匹配失败时）
      * - NONE   ：不校验（仅调试；需 sdkconfig 开 ESP_TLS_INSECURE + SKIP_SERVER_CERT_VERIFY）
      */
     esp_http_client_config_t cfg = {
