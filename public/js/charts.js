@@ -663,16 +663,11 @@ export function drawSeriesChart(canvas, points, key, opts = {}) {
   ctx.textBaseline = 'top';
   const leftLabel = xLabelForSpan(new Date(xMin).toISOString(), xSpan);
   const rightLabel = xLabelForSpan(new Date(xMax).toISOString(), xSpan);
-  if (width < 400) {
-    ctx.textAlign = 'left';
-    ctx.fillText(leftLabel, padL + 2, padT + plotH + 6);
-    ctx.textAlign = 'right';
-    ctx.fillText(rightLabel, padL + plotW - 2, padT + plotH + 6);
-  } else {
-    ctx.textAlign = 'center';
-    ctx.fillText(leftLabel, padL + 8, padT + plotH + 6);
-    ctx.fillText(rightLabel, padL + plotW - 8, padT + plotH + 6);
-  }
+  // 首尾标签改为左/右对齐，避免中心对齐时文字超出画布被裁掉尾部
+  ctx.textAlign = 'left';
+  ctx.fillText(leftLabel, padL + 2, padT + plotH + 6);
+  ctx.textAlign = 'right';
+  ctx.fillText(rightLabel, padL + plotW - 2, padT + plotH + 6);
 
   ctx.strokeStyle = COLORS.grid;
   ctx.strokeRect(padL, padT, plotW, plotH);
